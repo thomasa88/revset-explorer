@@ -1,98 +1,71 @@
-use std::fs::File;
-use std::io::Write;
-
-use std::{
-    collections::HashMap,
-    path::{Path, PathBuf},
-    str::FromStr,
-};
-
-use anyhow::Context;
+use eframe::egui::{self, ecolor};
+use jj_lib::backend::CommitId;
 use jj_lib::repo::Repo;
-use jj_lib::revset::Revset;
-use jj_lib::{
-    config::StackedConfig,
-    ref_name::WorkspaceName,
-    repo::{RepoLoader, StoreFactories},
-    repo_path::RepoPathUiConverter,
-    revset::{
-        self, RevsetAliasesMap, RevsetDiagnostics, RevsetExtensions, RevsetParseContext,
-        RevsetWorkspaceContext, SymbolResolver, SymbolResolverExtension,
-    },
-    settings::UserSettings,
-};
+use std::collections::HashMap;
 
-fn main() -> anyhow::Result<()> {
-    let now = chrono::Local::now();
-    let path_converter = RepoPathUiConverter::Fs {
-        cwd: PathBuf::from_str(".")?,
-        base: PathBuf::from_str(".")?,
-    };
-    let workspace = RevsetWorkspaceContext {
-        path_converter: &path_converter,
-        workspace_name: WorkspaceName::DEFAULT,
-    };
-    let context = RevsetParseContext {
-        aliases_map: &RevsetAliasesMap::new(),
-        local_variables: HashMap::new(),
-        user_email: "",
-        date_pattern_context: now.into(),
-        default_ignored_remote: None,
-        use_glob_by_default: false,
-        extensions: &RevsetExtensions::new(),
-        workspace: Some(workspace),
-    };
+mod jjgraph;
 
-    let settings = UserSettings::from_config(StackedConfig::with_defaults())?;
-    let store_factories = StoreFactories::default();
-    let repo =
-        RepoLoader::init_from_file_system(&settings, Path::new(".jj/repo"), &store_factories)?
-            .load_at_head()?;
-    let store = repo.store();
-    let extensions: Vec<Box<dyn SymbolResolverExtension>> = vec![];
-    let resolver = SymbolResolver::new(repo.as_ref(), &extensions);
-    // let mut diagnostics = RevsetDiagnostics::new();
+fn main() -> eframe::Result {
+    let options = eframe::NativeOptions {
+        viewport: egui::ViewportBuilder::default().with_inner_size([1024., 768.]),
+        ..Default::default()
+    };
+    eframe::run_native(
+        "Revset Explorer",
+        options,
+        Box::new(|_cc| Ok(Box::<ExplorerApp>::default())),
+    )
+}
 
-    let filter_spec = std::env::args()
-        .nth(1)
-        .context("Expected a revset specification as the first argument")?;
-    let filter_revset = get_revset(&*repo, &resolver, &context, &filter_spec)?;
-    // let all_revset = get_revset(&*repo, &resolver, &context, "::")?;
-    // present(@) | ancestors(immutable_heads().., 2) | present(trunk())
-    let all_revset = get_revset(&*repo, &resolver, &context, "::")?;
+struct ExplorerApp {
+    revset: String,
+    old_revset: String,
+    revset_error: Option<String>,
+    graph: egui_graphs::Graph<CommitId>,
+    node_idxs: Vec<petgraph::graph::NodeIndex>,
+    jj_graph: jjgraph::JjGraph,
+}
+
+impl Default for ExplorerApp {
+    fn default() -> Self {
+        let initial_revset = "@".to_owned();
+        let jj_graph = jjgraph::JjGraph::new().unwrap();
+        let (g, node_idxs) = generate_graph(&jj_graph).unwrap();
+        Self {
+            revset: initial_revset.clone(),
+            old_revset: "".to_owned(),
+            revset_error: None,
+            graph: g,
+            node_idxs,
+            jj_graph,
+        }
+    }
+}
+
+fn generate_graph(
+    jj_graph: &jjgraph::JjGraph,
+) -> anyhow::Result<(
+    egui_graphs::Graph<CommitId>,
+    Vec<petgraph::graph::NodeIndex>,
+)> {
+    let mut graph = egui_graphs::Graph::new(petgraph::stable_graph::StableGraph::default());
+
     // TODO: Import the revset aliases from the config
-    // let immutable_revset = get_revset(&*repo, &resolver, &context, "immutable()")?;
-    let immutable_revset = get_revset(
-        &*repo,
-        &resolver,
-        &context,
-        "::(present(latest(
-  remote_bookmarks(exact:\"main\", exact:\"origin\") |
-  remote_bookmarks(exact:\"master\", exact:\"origin\") |
-  remote_bookmarks(exact:\"trunk\", exact:\"origin\") |
-  remote_bookmarks(exact:\"main\", exact:\"upstream\") |
-  remote_bookmarks(exact:\"master\", exact:\"upstream\") |
-  remote_bookmarks(exact:\"trunk\", exact:\"upstream\") |
-  root()
-)) | tags() | untracked_remote_bookmarks() | root())",
-    )?;
+    // present(@) | ancestors(immutable_heads().., 2) | present(trunk())
+    let all_revset = jj_graph.get_revset("::")?;
 
-    let in_filter = filter_revset.containing_fn();
-    let is_immutable = immutable_revset.containing_fn();
-
-    let mut dot_file = File::create("graph.dot")?;
-    writeln!(dot_file, "digraph G {{")?;
-    writeln!(dot_file, "label=\"{}\";", filter_spec)?;
-    writeln!(dot_file, "labelloc=top;")?;
-    // writeln!(dot_file, "fontsize=20;")?;
-    for r in all_revset.iter_graph() {
-        let r = r.unwrap();
-        let commit_id = r.0;
-        // all_revset.commit_change_ids();
-        let edges = r.1;
+    let repo = jj_graph.get_repo();
+    let store = repo.store();
+    let mut node_idxs = vec![];
+    let mut node_map = HashMap::new();
+    let mut edges = vec![];
+    for rev in all_revset.iter_graph() {
+        let rev = rev?;
+        let commit_id = rev.0;
+        let commit_edges = rev.1;
         let commit = store.get_commit(&commit_id)?;
         let change_id = commit.change_id();
-        let change_id_len = repo.shortest_unique_change_id_prefix_len(&change_id)?;
+        let change_id_len = repo.shortest_unique_change_id_prefix_len(change_id)?;
         let change_id_prefix = change_id.to_string()[..change_id_len].to_string();
         let mut desc: String = commit
             .description()
@@ -105,61 +78,139 @@ fn main() -> anyhow::Result<()> {
         if desc.len() == 12 {
             desc += "...";
         }
-        let desc = desc.replace('"', "\\\"");
-        let mut attrs = vec![];
-        let mut style = String::new();
-        if in_filter(&commit_id)? {
-            style += "filled,";
-            attrs.push("fillcolor=lightblue");
-        }
-        if is_immutable(&commit_id)? {
-            style += "dashed,";
-        };
-        let style = &format!("style=\"{style}\"");
-        attrs.push(style);
-        let attrs = attrs.join(", ");
-        writeln!(
-            dot_file,
-            "    \"{commit_id}\" [label=\"{change_id_prefix}: {desc}\", {attrs}];"
-        )?;
-        for edge in edges {
-            writeln!(dot_file, "    \"{}\" -> \"{}\";", commit_id, edge.target)?;
+        let node_idx = graph.add_node_with_label(commit_id.clone(), change_id_prefix);
+        node_idxs.push(node_idx);
+        node_map.insert(commit_id.clone(), node_idx);
+
+        for commit_edge in commit_edges {
+            edges.push((commit_id.clone(), commit_edge.target));
         }
     }
-    writeln!(dot_file, "}}")?;
-    drop(dot_file); // Ensure the file is closed before running the command
-
-    // Use the `dot` command from Graphviz to generate a PNG
-    let output = std::process::Command::new("dot")
-        .args(&["-Tpng", "graph.dot", "-o", "graph.png"])
-        .output()?;
-
-    if !output.status.success() {
-        eprintln!(
-            "Failed to generate PNG: {}",
-            String::from_utf8_lossy(&output.stderr)
-        );
-    } else {
-        println!("PNG file 'graph.png' generated successfully.");
+    for edge in edges {
+        let start = node_map.get(&edge.0).unwrap();
+        let end = node_map.get(&edge.1).unwrap();
+        graph.add_edge_with_label(*start, *end, (), "".to_owned());
     }
-    // Grouped by heads/branches
-    // let topo_iter = TopoGroupedGraphIterator::new(revset.iter_graph(), |id| id);
-    // for node in topo_iter {
-    //     dbg!(&node);
-    // }
 
-    Ok(())
+    Ok((graph, node_idxs))
 }
 
-fn get_revset<'index>(
-    repo: &'index dyn Repo,
-    resolver: &SymbolResolver,
-    context: &RevsetParseContext<'_>,
-    revset_str: &str,
-) -> anyhow::Result<Box<dyn Revset + 'index>> {
-    let mut diagnostics = RevsetDiagnostics::new();
-    let (expr, _modifier) = revset::parse_with_modifier(&mut diagnostics, revset_str, &context)?;
-    let resolved = expr.resolve_user_expression(repo, &resolver)?;
-    let revset = resolved.evaluate(repo)?;
-    return Ok(revset);
+#[derive(Debug, PartialEq)]
+enum UpdateError {
+    RevsetParseError(String),
+    JjError,
+}
+
+impl ExplorerApp {
+    fn update_graph(&mut self) -> anyhow::Result<(), UpdateError> {
+        let filter_revset = self.jj_graph.get_revset(&self.revset);
+
+        #[expect(clippy::type_complexity)]
+        let (in_filter, revset_parse_error): (Box<dyn Fn(&CommitId) -> Result<_, _>>, _) =
+            match filter_revset {
+                Ok(filter_revset) => (filter_revset.containing_fn(), None),
+                Err(e) => (
+                    // Revset is bad, so unmark all nodes
+                    Box::new(|_| Ok(false)),
+                    Some(e),
+                ),
+            };
+
+        // TODO: Global var
+        let immutable_revset = self
+            .jj_graph
+            .get_revset(
+                "::(present(latest(
+  remote_bookmarks(exact:\"main\", exact:\"origin\") |
+  remote_bookmarks(exact:\"master\", exact:\"origin\") |
+  remote_bookmarks(exact:\"trunk\", exact:\"origin\") |
+  remote_bookmarks(exact:\"main\", exact:\"upstream\") |
+  remote_bookmarks(exact:\"master\", exact:\"upstream\") |
+  remote_bookmarks(exact:\"trunk\", exact:\"upstream\") |
+  root()
+)) | tags() | untracked_remote_bookmarks() | root())",
+            )
+            .map_err(|_| UpdateError::JjError)?;
+
+        let is_immutable = immutable_revset.containing_fn();
+
+        for node_idx in self.node_idxs.iter() {
+            let node = self.graph.node_mut(*node_idx).unwrap();
+            let commit_id = node.payload();
+            let immutable = is_immutable(commit_id).map_err(|_| UpdateError::JjError)?;
+            #[expect(clippy::collapsible_else_if)]
+            if in_filter(commit_id).map_err(|_| UpdateError::JjError)? {
+                if immutable {
+                    node.set_color(ecolor::Color32::LIGHT_GREEN);
+                } else {
+                    node.set_color(ecolor::Color32::GREEN);
+                }
+            } else {
+                if immutable {
+                    node.set_color(ecolor::Color32::GRAY);
+                } else {
+                    node.set_color(ecolor::Color32::DARK_GRAY);
+                }
+            }
+        }
+
+        if let Some(e) = revset_parse_error {
+            Err(UpdateError::RevsetParseError(e.to_string()))
+        } else {
+            Ok(())
+        }
+    }
+}
+
+impl eframe::App for ExplorerApp {
+    fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        egui::CentralPanel::default().show(ctx, |ui| {
+            if self.revset != self.old_revset {
+                let update_result = self.update_graph();
+                self.revset_error = match update_result {
+                    Ok(()) => None,
+                    Err(UpdateError::RevsetParseError(msg)) => Some(msg),
+                    Err(UpdateError::JjError) => None,
+                };
+                self.old_revset = self.revset.clone();
+            }
+            ui.horizontal(|ui| {
+                let revset_label = ui.label("Revset: ");
+                ui.scope(|ui| {
+                    if self.revset_error.is_some() {
+                        ui.visuals_mut().extreme_bg_color = ecolor::Color32::DARK_RED;
+                    }
+                    ui.text_edit_singleline(&mut self.revset)
+                        .labelled_by(revset_label.id)
+                        .request_focus();
+                });
+                let _error_label = ui.label(self.revset_error.clone().unwrap_or_default());
+            });
+
+            let navigation =
+                egui_graphs::SettingsNavigation::default().with_fit_to_screen_enabled(true);
+            let interaction = egui_graphs::SettingsInteraction::default()
+                .with_dragging_enabled(false)
+                .with_edge_clicking_enabled(false)
+                .with_edge_selection_enabled(false)
+                .with_hover_enabled(true)
+                .with_node_clicking_enabled(false)
+                .with_node_selection_enabled(false);
+
+            let mut view = egui_graphs::GraphView::<
+                _,
+                _,
+                _,
+                _,
+                _,
+                _,
+                egui_graphs::LayoutStateHierarchical,
+                egui_graphs::LayoutHierarchical,
+            >::new(&mut self.graph)
+            .with_navigations(&navigation)
+            .with_interactions(&interaction)
+            .with_styles(&egui_graphs::SettingsStyle::default().with_labels_always(true));
+            ui.add(&mut view);
+        });
+    }
 }
