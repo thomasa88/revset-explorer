@@ -4,3 +4,6 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
+anyhow = { version = "1.0.100", features = ["backtrace"] }
+chrono = "0.4.42"
+jj-lib = "0.36.0"
