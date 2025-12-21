@@ -5,6 +5,10 @@ use std::collections::HashMap;
 
 mod jjgraph;
 
+// The undirected graph does not put nodes in nice positions when rendering a hierarchical graph view.
+// type GraphType = egui_graphs::Graph<CommitId, (), petgraph::Undirected>;
+type GraphType = egui_graphs::Graph<CommitId, (), petgraph::Directed>;
+
 fn main() -> eframe::Result {
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default().with_inner_size([1024., 768.]),
@@ -21,7 +25,7 @@ struct ExplorerApp {
     revset: String,
     old_revset: String,
     revset_error: Option<String>,
-    graph: egui_graphs::Graph<CommitId>,
+    graph: GraphType,
     node_idxs: Vec<petgraph::graph::NodeIndex>,
     jj_graph: jjgraph::JjGraph,
 }
@@ -44,11 +48,9 @@ impl Default for ExplorerApp {
 
 fn generate_graph(
     jj_graph: &jjgraph::JjGraph,
-) -> anyhow::Result<(
-    egui_graphs::Graph<CommitId>,
-    Vec<petgraph::graph::NodeIndex>,
-)> {
-    let mut graph = egui_graphs::Graph::new(petgraph::stable_graph::StableGraph::default());
+) -> anyhow::Result<(GraphType, Vec<petgraph::graph::NodeIndex>)> {
+    let mut graph: GraphType =
+        egui_graphs::Graph::new(petgraph::stable_graph::StableGraph::default());
 
     // TODO: Import the revset aliases from the config
     // present(@) | ancestors(immutable_heads().., 2) | present(trunk())
