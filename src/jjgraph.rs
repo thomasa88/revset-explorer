@@ -1,3 +1,4 @@
+use etcetera::BaseStrategy;
 use jj_lib::config::StackedConfig;
 use jj_lib::ref_name::WorkspaceName;
 use jj_lib::repo::{ReadonlyRepo, RepoLoader, StoreFactories};
@@ -38,9 +39,21 @@ impl JjGraph {
         let repo =
             RepoLoader::init_from_file_system(&settings, Path::new(".jj/repo"), &store_factories)?
                 .load_at_head()?;
+
+        let mut aliases_map = RevsetAliasesMap::new();
+        let user_config_path = {
+            let mut path = etcetera::choose_base_strategy().unwrap().config_dir();
+            path.push("jj/config.toml");
+            path
+        };
+        let jj_revsets = include_str!("revsets.toml");
+        let user_config = std::fs::read_to_string(&user_config_path)?;
+        load_aliases(jj_revsets, &mut aliases_map)?;
+        load_aliases(&user_config, &mut aliases_map)?;
+
         Ok(Self {
             path_converter,
-            aliases_map: RevsetAliasesMap::new(),
+            aliases_map,
             repo,
             revset_exts: RevsetExtensions::new(),
             resolver_exts: vec![],
@@ -82,4 +95,14 @@ impl JjGraph {
     pub fn get_repo(&self) -> Arc<ReadonlyRepo> {
         self.repo.clone()
     }
+}
+
+fn load_aliases(config_str: &str, into: &mut RevsetAliasesMap) -> anyhow::Result<()> {
+    let config = config_str.parse::<toml::Table>()?;
+    if let Some(aliases) = config.get("revset-aliases") {
+        for (alias, expr) in aliases.as_table().unwrap().iter() {
+            into.insert(alias, expr.as_str().unwrap()).unwrap();
+        }
+    }
+    Ok(())
 }

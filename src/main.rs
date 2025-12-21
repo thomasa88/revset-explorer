@@ -58,9 +58,8 @@ fn generate_graph(
     let mut graph: GraphType =
         egui_graphs::Graph::new(petgraph::stable_graph::StableGraph::default());
 
-    // TODO: Import the revset aliases from the config
-    // present(@) | ancestors(immutable_heads().., 2) | present(trunk())
-    let all_revset = jj_graph.get_revset("::")?;
+    // This is the default log macro in jj: present(@) | ancestors(immutable_heads().., 2) | present(trunk())
+    let all_revset = jj_graph.get_revset("present(@) | ancestors(immutable_heads().., 5) | present(trunk())")?;
 
     let repo = jj_graph.get_repo();
     let working_copy_commit_id = repo
