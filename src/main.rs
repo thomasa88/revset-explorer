@@ -5,6 +5,8 @@ use std::collections::HashMap;
 
 mod jjgraph;
 
+const MAX_NODES: usize = 100;
+
 // The undirected graph does not put nodes in nice positions when rendering a hierarchical graph view.
 // type GraphType = egui_graphs::Graph<CommitId, (), petgraph::Undirected>;
 type GraphType = egui_graphs::Graph<CommitId, (), petgraph::Directed>;
@@ -22,28 +24,45 @@ fn main() -> eframe::Result {
 }
 
 struct ExplorerApp {
-    revset: String,
-    old_revset: String,
-    revset_error: Option<String>,
+    filter_revset: RevsetEntry,
+    view_revset: RevsetEntry,
     graph: GraphType,
     node_idxs: Vec<petgraph::graph::NodeIndex>,
     jj_graph: jjgraph::JjGraph,
     working_copy_commit_id: Option<CommitId>,
 }
 
+struct RevsetEntry {
+    value: String,
+    old_value: String,
+    error: Option<String>,
+}
+
+impl RevsetEntry {
+    fn new(initial_value: &str) -> Self {
+        Self {
+            value: initial_value.to_owned(),
+            old_value: "".to_owned(),
+            error: None,
+        }
+    }
+}
+
 impl Default for ExplorerApp {
     fn default() -> Self {
-        let initial_revset = "@".to_owned();
+        let initial_filter = "@".to_owned();
+        // This is the default log macro in jj: present(@) | ancestors(immutable_heads().., 2) | present(trunk())
+        let initial_view =
+            "present(@) | ancestors(immutable_heads().., 2) | present(trunk())".to_owned();
         let jj_graph = jjgraph::JjGraph::new().unwrap();
-        let (g, node_idxs) = generate_graph(&jj_graph).unwrap();
+        let (g, node_idxs) = create_graph(&jj_graph, &initial_view).unwrap();
         let repo = jj_graph.get_repo();
         let working_copy_commit_id = repo
             .view()
             .get_wc_commit_id(jj_lib::ref_name::WorkspaceName::DEFAULT);
         Self {
-            revset: initial_revset.clone(),
-            old_revset: "".to_owned(),
-            revset_error: None,
+            filter_revset: RevsetEntry::new(&initial_filter),
+            view_revset: RevsetEntry::new(&initial_view),
             graph: g,
             node_idxs,
             jj_graph,
@@ -52,14 +71,14 @@ impl Default for ExplorerApp {
     }
 }
 
-fn generate_graph(
+fn create_graph(
     jj_graph: &jjgraph::JjGraph,
+    revset_str: &str,
 ) -> anyhow::Result<(GraphType, Vec<petgraph::graph::NodeIndex>)> {
     let mut graph: GraphType =
         egui_graphs::Graph::new(petgraph::stable_graph::StableGraph::default());
 
-    // This is the default log macro in jj: present(@) | ancestors(immutable_heads().., 2) | present(trunk())
-    let all_revset = jj_graph.get_revset("present(@) | ancestors(immutable_heads().., 5) | present(trunk())")?;
+    let all_revset = jj_graph.get_revset(revset_str)?;
 
     let repo = jj_graph.get_repo();
     let working_copy_commit_id = repo
@@ -69,7 +88,8 @@ fn generate_graph(
     let mut node_idxs = vec![];
     let mut node_map = HashMap::new();
     let mut edges = vec![];
-    for rev in all_revset.iter_graph() {
+    // TODO: Warn when max nodes is hit
+    for rev in all_revset.iter_graph().take(MAX_NODES) {
         let rev = rev?;
         let commit_id = rev.0;
         let commit_edges = rev.1;
@@ -102,8 +122,12 @@ fn generate_graph(
         }
     }
     for edge in edges {
-        let Some(start) = node_map.get(&edge.0) else { continue };
-        let Some(end) = node_map.get(&edge.1) else { continue };
+        let Some(start) = node_map.get(&edge.0) else {
+            continue;
+        };
+        let Some(end) = node_map.get(&edge.1) else {
+            continue;
+        };
         graph.add_edge_with_label(*start, *end, (), "".to_owned());
     }
 
@@ -117,8 +141,8 @@ enum UpdateError {
 }
 
 impl ExplorerApp {
-    fn update_graph(&mut self) -> anyhow::Result<(), UpdateError> {
-        let filter_revset = self.jj_graph.get_revset(&self.revset);
+    fn mark_graph(&mut self) -> anyhow::Result<(), UpdateError> {
+        let filter_revset = self.jj_graph.get_revset(&self.filter_revset.value);
 
         #[expect(clippy::type_complexity)]
         let (in_filter, revset_parse_error): (Box<dyn Fn(&CommitId) -> Result<_, _>>, _) =
@@ -134,17 +158,7 @@ impl ExplorerApp {
         // TODO: Global var
         let immutable_revset = self
             .jj_graph
-            .get_revset(
-                "::(present(latest(
-  remote_bookmarks(exact:\"main\", exact:\"origin\") |
-  remote_bookmarks(exact:\"master\", exact:\"origin\") |
-  remote_bookmarks(exact:\"trunk\", exact:\"origin\") |
-  remote_bookmarks(exact:\"main\", exact:\"upstream\") |
-  remote_bookmarks(exact:\"master\", exact:\"upstream\") |
-  remote_bookmarks(exact:\"trunk\", exact:\"upstream\") |
-  root()
-)) | tags() | untracked_remote_bookmarks() | root())",
-            )
+            .get_revset("immutable()")
             .map_err(|_| UpdateError::JjError)?;
 
         let is_immutable = immutable_revset.containing_fn();
@@ -206,35 +220,56 @@ impl ExplorerApp {
 
 impl eframe::App for ExplorerApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
+        let revset_edit = |ui: &mut egui::Ui, label: &str, revset: &mut RevsetEntry| {
+            let revset_label = ui.label(label);
+            ui.scope(|ui| {
+                if revset.error.is_some() {
+                    ui.visuals_mut().extreme_bg_color = ecolor::Color32::DARK_RED;
+                }
+                ui.text_edit_singleline(&mut revset.value)
+                    .labelled_by(revset_label.id);
+            });
+            let err_msg = if let Some(err_msg) = revset.error.as_ref() {
+                // Remove empty lines, to make the error message more compact
+                err_msg.replace("  |\n", "")
+            } else {
+                "".to_owned()
+            };
+            let _error_label = ui.add_sized(
+                [1., ui.text_style_height(&egui::TextStyle::Monospace) * 4.],
+                egui::Label::new(RichText::new(err_msg).family(egui::FontFamily::Monospace)),
+            );
+        };
+
         egui::CentralPanel::default().show(ctx, |ui| {
-            if self.revset != self.old_revset {
-                let update_result = self.update_graph();
-                self.revset_error = match update_result {
+            let view_updated = self.view_revset.value != self.view_revset.old_value;
+            if view_updated {
+                let create_result = create_graph(&self.jj_graph, &self.view_revset.value);
+                self.view_revset.error = match create_result {
+                    Ok((g, node_idxs)) => {
+                        self.graph = g;
+                        self.node_idxs = node_idxs;
+                        egui_graphs::reset_layout::<egui_graphs::LayoutStateHierarchical>(ui, None);
+                        None
+                    }
+                    Err(e) => Some(e.to_string()),
+                };
+                self.view_revset.old_value = self.view_revset.value.clone();
+            }
+
+            if view_updated || self.filter_revset.value != self.filter_revset.old_value {
+                let update_result = self.mark_graph();
+                self.filter_revset.error = match update_result {
                     Ok(()) => None,
                     Err(UpdateError::RevsetParseError(msg)) => Some(msg),
                     Err(UpdateError::JjError) => None,
                 };
-                self.old_revset = self.revset.clone();
+                self.filter_revset.old_value = self.filter_revset.value.clone();
             }
+
             ui.horizontal(|ui| {
-                let revset_label = ui.label("Revset: ");
-                ui.scope(|ui| {
-                    if self.revset_error.is_some() {
-                        ui.visuals_mut().extreme_bg_color = ecolor::Color32::DARK_RED;
-                    }
-                    ui.text_edit_singleline(&mut self.revset)
-                        .labelled_by(revset_label.id)
-                        .request_focus();
-                });
-                let err_msg = if let Some(err_msg) = self.revset_error.as_ref() {
-                    err_msg.replace("  |\n", "")
-                } else {
-                    "".to_owned()
-                };
-                let _error_label = ui.add_sized(
-                    [1., ui.text_style_height(&egui::TextStyle::Monospace) * 4.],
-                    egui::Label::new(RichText::new(err_msg).family(egui::FontFamily::Monospace)),
-                );
+                revset_edit(ui, "Select: ", &mut self.filter_revset);
+                revset_edit(ui, "View: ", &mut self.view_revset);
             });
 
             let navigation = egui_graphs::SettingsNavigation::default()
