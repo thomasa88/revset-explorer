@@ -28,6 +28,7 @@ struct ExplorerApp {
     graph: GraphType,
     node_idxs: Vec<petgraph::graph::NodeIndex>,
     jj_graph: jjgraph::JjGraph,
+    working_copy_commit_id: Option<CommitId>,
 }
 
 impl Default for ExplorerApp {
@@ -35,6 +36,10 @@ impl Default for ExplorerApp {
         let initial_revset = "@".to_owned();
         let jj_graph = jjgraph::JjGraph::new().unwrap();
         let (g, node_idxs) = generate_graph(&jj_graph).unwrap();
+        let repo = jj_graph.get_repo();
+        let working_copy_commit_id = repo
+            .view()
+            .get_wc_commit_id(jj_lib::ref_name::WorkspaceName::DEFAULT);
         Self {
             revset: initial_revset.clone(),
             old_revset: "".to_owned(),
@@ -42,6 +47,7 @@ impl Default for ExplorerApp {
             graph: g,
             node_idxs,
             jj_graph,
+            working_copy_commit_id: working_copy_commit_id.cloned(),
         }
     }
 }
@@ -57,6 +63,9 @@ fn generate_graph(
     let all_revset = jj_graph.get_revset("::")?;
 
     let repo = jj_graph.get_repo();
+    let working_copy_commit_id = repo
+        .view()
+        .get_wc_commit_id(jj_lib::ref_name::WorkspaceName::DEFAULT);
     let store = repo.store();
     let mut node_idxs = vec![];
     let mut node_map = HashMap::new();
@@ -69,6 +78,7 @@ fn generate_graph(
         let change_id = commit.change_id();
         let change_id_len = repo.shortest_unique_change_id_prefix_len(change_id)?;
         let change_id_prefix = change_id.to_string()[..change_id_len].to_string();
+
         let mut desc: String = commit
             .description()
             .lines()
@@ -80,7 +90,11 @@ fn generate_graph(
         if desc.len() == 12 {
             desc += "...";
         }
-        let node_idx = graph.add_node_with_label(commit_id.clone(), change_id_prefix);
+        let mut label = change_id_prefix;
+        if Some(&commit_id) == working_copy_commit_id {
+            label = format!("@ {label}");
+        }
+        let node_idx = graph.add_node_with_label(commit_id.clone(), label);
         node_idxs.push(node_idx);
         node_map.insert(commit_id.clone(), node_idx);
 
@@ -140,20 +154,47 @@ impl ExplorerApp {
             let node = self.graph.node_mut(*node_idx).unwrap();
             let commit_id = node.payload();
             let immutable = is_immutable(commit_id).map_err(|_| UpdateError::JjError)?;
-            #[expect(clippy::collapsible_else_if)]
-            if in_filter(commit_id).map_err(|_| UpdateError::JjError)? {
-                if immutable {
-                    node.set_color(ecolor::Color32::LIGHT_GREEN);
-                } else {
-                    node.set_color(ecolor::Color32::GREEN);
-                }
-            } else {
-                if immutable {
-                    node.set_color(ecolor::Color32::GRAY);
-                } else {
-                    node.set_color(ecolor::Color32::DARK_GRAY);
-                }
+            let matches_filter = in_filter(commit_id).map_err(|_| UpdateError::JjError)?;
+            let is_wc_commit = self
+                .working_copy_commit_id
+                .as_ref()
+                .is_some_and(|wc| commit_id == wc);
+
+            #[derive(Debug, PartialEq, Eq, Hash)]
+            enum NodeType {
+                WorkingCopy,
+                Immutable,
+                Regular,
             }
+            #[derive(Debug, PartialEq, Eq, Hash)]
+            enum FilterMatch {
+                Match,
+                NoMatch,
+            }
+            let node_type = if is_wc_commit {
+                NodeType::WorkingCopy
+            } else if immutable {
+                NodeType::Immutable
+            } else {
+                NodeType::Regular
+            };
+            let filter_match = if matches_filter {
+                FilterMatch::Match
+            } else {
+                FilterMatch::NoMatch
+            };
+            #[rustfmt::skip]
+            let color_map = HashMap::from([
+                ((NodeType::WorkingCopy, FilterMatch::Match), ecolor::Color32::from_hex("#26ff00ff").unwrap()),
+                ((NodeType::WorkingCopy, FilterMatch::NoMatch), ecolor::Color32::from_hex("#295923").unwrap()),
+                ((NodeType::Immutable, FilterMatch::Match), ecolor::Color32::from_hex("#21cdff").unwrap()),
+                ((NodeType::Immutable, FilterMatch::NoMatch), ecolor::Color32::from_hex("#2e5059").unwrap()),
+                ((NodeType::Regular, FilterMatch::Match), ecolor::Color32::from_hex("#fffc00").unwrap()),
+                ((NodeType::Regular, FilterMatch::NoMatch), ecolor::Color32::from_hex("#636222").unwrap()),
+                // ((NodeType::Regular, FilterMatch::Match), ecolor::Color32::from_hex("#ffa400").unwrap()),
+                // ((NodeType::Regular, FilterMatch::NoMatch), ecolor::Color32::from_hex("#634c22").unwrap()),
+            ]);
+            node.set_color(color_map[&(node_type, filter_match)]);
         }
 
         if let Some(e) = revset_parse_error {
@@ -197,8 +238,9 @@ impl eframe::App for ExplorerApp {
                 );
             });
 
-            let navigation =
-                egui_graphs::SettingsNavigation::default().with_fit_to_screen_enabled(true);
+            let navigation = egui_graphs::SettingsNavigation::default()
+                .with_fit_to_screen_enabled(true)
+                .with_zoom_and_pan_enabled(true);
             let interaction = egui_graphs::SettingsInteraction::default()
                 .with_dragging_enabled(false)
                 .with_edge_clicking_enabled(false)
