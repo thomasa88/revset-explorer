@@ -103,8 +103,8 @@ fn generate_graph(
         }
     }
     for edge in edges {
-        let start = node_map.get(&edge.0).unwrap();
-        let end = node_map.get(&edge.1).unwrap();
+        let Some(start) = node_map.get(&edge.0) else { continue };
+        let Some(end) = node_map.get(&edge.1) else { continue };
         graph.add_edge_with_label(*start, *end, (), "".to_owned());
     }
 
