@@ -1,4 +1,4 @@
-use eframe::egui::{self, ecolor};
+use eframe::egui::{self, RichText, ecolor};
 use jj_lib::backend::CommitId;
 use jj_lib::repo::Repo;
 use std::collections::HashMap;
@@ -186,7 +186,15 @@ impl eframe::App for ExplorerApp {
                         .labelled_by(revset_label.id)
                         .request_focus();
                 });
-                let _error_label = ui.label(self.revset_error.clone().unwrap_or_default());
+                let err_msg = if let Some(err_msg) = self.revset_error.as_ref() {
+                    err_msg.replace("  |\n", "")
+                } else {
+                    "".to_owned()
+                };
+                let _error_label = ui.add_sized(
+                    [1., ui.text_style_height(&egui::TextStyle::Monospace) * 4.],
+                    egui::Label::new(RichText::new(err_msg).family(egui::FontFamily::Monospace)),
+                );
             });
 
             let navigation =
