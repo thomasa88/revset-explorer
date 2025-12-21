@@ -55,7 +55,7 @@ impl Default for ExplorerApp {
         let initial_view =
             "present(@) | ancestors(immutable_heads().., 2) | present(trunk())".to_owned();
         let jj_graph = jjgraph::JjGraph::new().unwrap();
-        let (g, node_idxs) = create_graph(&jj_graph, &initial_view).unwrap();
+        let (g, node_idxs, _) = create_graph(&jj_graph, &initial_view).unwrap();
         let repo = jj_graph.get_repo();
         let working_copy_commit_id = repo
             .view()
@@ -71,14 +71,22 @@ impl Default for ExplorerApp {
     }
 }
 
+#[derive(Debug, PartialEq)]
+enum CreateError {
+    RevsetParseError(String),
+    JjError(String),
+}
+
 fn create_graph(
     jj_graph: &jjgraph::JjGraph,
     revset_str: &str,
-) -> anyhow::Result<(GraphType, Vec<petgraph::graph::NodeIndex>)> {
+) -> Result<(GraphType, Vec<petgraph::graph::NodeIndex>, bool), CreateError> {
     let mut graph: GraphType =
         egui_graphs::Graph::new(petgraph::stable_graph::StableGraph::default());
 
-    let all_revset = jj_graph.get_revset(revset_str)?;
+    let all_revset = jj_graph
+        .get_revset(revset_str)
+        .map_err(|e| CreateError::RevsetParseError(e.to_string()))?;
 
     let repo = jj_graph.get_repo();
     let working_copy_commit_id = repo
@@ -90,12 +98,16 @@ fn create_graph(
     let mut edges = vec![];
     // TODO: Warn when max nodes is hit
     for rev in all_revset.iter_graph().take(MAX_NODES) {
-        let rev = rev?;
+        let rev = rev.map_err(|e| CreateError::JjError(e.to_string()))?;
         let commit_id = rev.0;
         let commit_edges = rev.1;
-        let commit = store.get_commit(&commit_id)?;
+        let commit = store
+            .get_commit(&commit_id)
+            .map_err(|e| CreateError::JjError(e.to_string()))?;
         let change_id = commit.change_id();
-        let change_id_len = repo.shortest_unique_change_id_prefix_len(change_id)?;
+        let change_id_len = repo
+            .shortest_unique_change_id_prefix_len(change_id)
+            .map_err(|e| CreateError::JjError(e.to_string()))?;
         let change_id_prefix = change_id.to_string()[..change_id_len].to_string();
 
         let mut desc: String = commit
@@ -131,17 +143,19 @@ fn create_graph(
         graph.add_edge_with_label(*start, *end, (), "".to_owned());
     }
 
-    Ok((graph, node_idxs))
+    let limit_hit = node_idxs.len() == MAX_NODES;
+
+    Ok((graph, node_idxs, limit_hit))
 }
 
 #[derive(Debug, PartialEq)]
-enum UpdateError {
+enum MarkError {
     RevsetParseError(String),
     JjError,
 }
 
 impl ExplorerApp {
-    fn mark_graph(&mut self) -> anyhow::Result<(), UpdateError> {
+    fn mark_graph(&mut self) -> anyhow::Result<(), MarkError> {
         let filter_revset = self.jj_graph.get_revset(&self.filter_revset.value);
 
         #[expect(clippy::type_complexity)]
@@ -159,15 +173,15 @@ impl ExplorerApp {
         let immutable_revset = self
             .jj_graph
             .get_revset("immutable()")
-            .map_err(|_| UpdateError::JjError)?;
+            .map_err(|_| MarkError::JjError)?;
 
         let is_immutable = immutable_revset.containing_fn();
 
         for node_idx in self.node_idxs.iter() {
             let node = self.graph.node_mut(*node_idx).unwrap();
             let commit_id = node.payload();
-            let immutable = is_immutable(commit_id).map_err(|_| UpdateError::JjError)?;
-            let matches_filter = in_filter(commit_id).map_err(|_| UpdateError::JjError)?;
+            let immutable = is_immutable(commit_id).map_err(|_| MarkError::JjError)?;
+            let matches_filter = in_filter(commit_id).map_err(|_| MarkError::JjError)?;
             let is_wc_commit = self
                 .working_copy_commit_id
                 .as_ref()
@@ -211,7 +225,7 @@ impl ExplorerApp {
         }
 
         if let Some(e) = revset_parse_error {
-            Err(UpdateError::RevsetParseError(e.to_string()))
+            Err(MarkError::RevsetParseError(e.to_string()))
         } else {
             Ok(())
         }
@@ -246,13 +260,18 @@ impl eframe::App for ExplorerApp {
             if view_updated {
                 let create_result = create_graph(&self.jj_graph, &self.view_revset.value);
                 self.view_revset.error = match create_result {
-                    Ok((g, node_idxs)) => {
+                    Ok((g, node_idxs, limit_hit)) => {
                         self.graph = g;
                         self.node_idxs = node_idxs;
                         egui_graphs::reset_layout::<egui_graphs::LayoutStateHierarchical>(ui, None);
-                        None
+                        if limit_hit {
+                            Some(format!("Node limit reached. The graph is incomplete."))
+                        } else {
+                            None
+                        }
                     }
-                    Err(e) => Some(e.to_string()),
+                    Err(CreateError::RevsetParseError(msg)) => Some(msg),
+                    Err(CreateError::JjError(msg)) => Some(msg),
                 };
                 self.view_revset.old_value = self.view_revset.value.clone();
             }
@@ -261,8 +280,8 @@ impl eframe::App for ExplorerApp {
                 let update_result = self.mark_graph();
                 self.filter_revset.error = match update_result {
                     Ok(()) => None,
-                    Err(UpdateError::RevsetParseError(msg)) => Some(msg),
-                    Err(UpdateError::JjError) => None,
+                    Err(MarkError::RevsetParseError(msg)) => Some(msg),
+                    Err(MarkError::JjError) => None,
                 };
                 self.filter_revset.old_value = self.filter_revset.value.clone();
             }
