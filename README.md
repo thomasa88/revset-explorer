@@ -1,4 +1,4 @@
-Revset Explorer is a tool to explore and better understand how revsets work in Jujutsu (jj).
+Revset Explorer is a tool to explore and better understand how [revsets](https://docs.jj-vcs.dev/latest/revsets/) work in Jujutsu (jj).
 
 This software is an experiment and I don't expect to maintain it. However, I might accept ready-to-use PRs. 
 
@@ -18,7 +18,7 @@ The window that opens shows a part of the commit tree, as decided by the "view" 
 
 ![Screenshot](screenshot.png)
 
-Now you can enter your desired revset in the "filter" input. Nodes matching your filter will be highlighted.
+Now you can enter your desired [revset](https://docs.jj-vcs.dev/latest/revsets/) in the "filter" input. Nodes matching your filter will be highlighted.
 
 Use the "view" input to change what nodes are shown in the program.
 
