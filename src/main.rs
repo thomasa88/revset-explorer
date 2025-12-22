@@ -20,10 +20,18 @@ struct Args {
     /// Path to the JJ repository to explore
     #[arg(short = 'R', long, default_value = ".")]
     repository: PathBuf,
+    /// Generate a sample repository to explore. It will create the directory "revset-sample".
+    #[arg(long, default_value_t = false)]
+    create_sample: bool,
 }
 
 fn main() -> anyhow::Result<()> {
     let args = Args::parse();
+
+    if args.create_sample {
+        create_sample_repo()?;
+        return Ok(());
+    }
 
     let repo_path = args
         .repository
@@ -44,6 +52,32 @@ fn main() -> anyhow::Result<()> {
         Box::new(|_cc| Ok(Box::new(ExplorerApp::new(&repo_path)))),
     )
     .unwrap();
+    Ok(())
+}
+
+fn create_sample_repo() -> Result<(), anyhow::Error> {
+    let sample_repo_path = PathBuf::from("revset-sample");
+    if sample_repo_path.exists() {
+        anyhow::bail!(
+            "Sample repository directory \"{}\" already exists. Please remove it first.",
+            sample_repo_path.display()
+        );
+    }
+    let sample_script = include_str!("create_sample_repo.sh");
+    let output = std::process::Command::new("bash")
+        .arg("-c")
+        .arg(&sample_script)
+        .stderr(std::process::Stdio::piped())
+        .spawn()?
+        .wait_with_output()?;
+    if !output.status.success() {
+        println!("{}", String::from_utf8_lossy(&output.stderr));
+        anyhow::bail!("Failed to create sample repository");
+    }
+    println!(
+        "Sample repository created in \"{0}\". Run the following command to explore it:\nrevset-explorer -R {0}",
+        sample_repo_path.display()
+    );
     Ok(())
 }
 
