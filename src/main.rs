@@ -291,24 +291,26 @@ impl ExplorerApp {
 impl eframe::App for ExplorerApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         let revset_edit = |ui: &mut egui::Ui, label: &str, revset: &mut RevsetEntry| {
-            let revset_label = ui.label(label);
-            ui.scope(|ui| {
-                if revset.error.is_some() {
-                    ui.visuals_mut().extreme_bg_color = ecolor::Color32::DARK_RED;
-                }
-                ui.text_edit_singleline(&mut revset.value)
-                    .labelled_by(revset_label.id);
+            ui.horizontal(|ui| {
+                let revset_label = ui.label(label);
+                ui.scope(|ui| {
+                    if revset.error.is_some() {
+                        ui.visuals_mut().extreme_bg_color = ecolor::Color32::DARK_RED;
+                    }
+                    ui.add(egui::TextEdit::singleline(&mut revset.value).desired_width(600.))
+                        .labelled_by(revset_label.id);
+                });
+                let err_msg = if let Some(err_msg) = revset.error.as_ref() {
+                    // Remove empty lines, to make the error message more compact
+                    err_msg.replace("  |\n", "")
+                } else {
+                    "".to_owned()
+                };
+                let _error_label = ui.add_sized(
+                    [1., ui.text_style_height(&egui::TextStyle::Monospace) * 4.],
+                    egui::Label::new(RichText::new(err_msg).family(egui::FontFamily::Monospace)),
+                );
             });
-            let err_msg = if let Some(err_msg) = revset.error.as_ref() {
-                // Remove empty lines, to make the error message more compact
-                err_msg.replace("  |\n", "")
-            } else {
-                "".to_owned()
-            };
-            let _error_label = ui.add_sized(
-                [1., ui.text_style_height(&egui::TextStyle::Monospace) * 4.],
-                egui::Label::new(RichText::new(err_msg).family(egui::FontFamily::Monospace)),
-            );
         };
 
         egui::CentralPanel::default().show(ctx, |ui| {
@@ -342,10 +344,8 @@ impl eframe::App for ExplorerApp {
                 self.filter_revset.old_value = self.filter_revset.value.clone();
             }
 
-            ui.horizontal(|ui| {
-                revset_edit(ui, "Select: ", &mut self.filter_revset);
-                revset_edit(ui, "View: ", &mut self.view_revset);
-            });
+            revset_edit(ui, "Select: ", &mut self.filter_revset);
+            revset_edit(ui, "View: ", &mut self.view_revset);
 
             let navigation = egui_graphs::SettingsNavigation::default()
                 .with_fit_to_screen_enabled(true)
