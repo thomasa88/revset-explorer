@@ -53,7 +53,7 @@ impl Default for ExplorerApp {
         let initial_filter = "@".to_owned();
         // This is the default log macro in jj: present(@) | ancestors(immutable_heads().., 2) | present(trunk())
         let initial_view =
-            "present(@) | ancestors(immutable_heads().., 2) | present(trunk())".to_owned();
+            "present(@) | ancestors(immutable_heads().., 5) | present(trunk())".to_owned();
         let jj_graph = jjgraph::JjGraph::new().unwrap();
         let (g, node_idxs, _) = create_graph(&jj_graph, &initial_view).unwrap();
         let repo = jj_graph.get_repo();
