@@ -29,16 +29,19 @@ pub enum RevsetError {
 }
 
 impl JjGraph {
-    pub fn new() -> anyhow::Result<Self> {
+    pub fn new(repo_path: &Path) -> anyhow::Result<Self> {
         let path_converter = RepoPathUiConverter::Fs {
             cwd: PathBuf::from_str(".").unwrap(),
             base: PathBuf::from_str(".").unwrap(),
         };
         let settings = UserSettings::from_config(StackedConfig::with_defaults())?;
         let store_factories = StoreFactories::default();
-        let repo =
-            RepoLoader::init_from_file_system(&settings, Path::new(".jj/repo"), &store_factories)?
-                .load_at_head()?;
+        let repo = RepoLoader::init_from_file_system(
+            &settings,
+            &repo_path.join(".jj/repo"),
+            &store_factories,
+        )?
+        .load_at_head()?;
 
         let mut aliases_map = RevsetAliasesMap::new();
         let user_config_path = {

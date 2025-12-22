@@ -1,7 +1,10 @@
+use anyhow::Context;
+use clap::Parser;
 use eframe::egui::{self, RichText, ecolor};
 use jj_lib::backend::CommitId;
 use jj_lib::repo::Repo;
 use std::collections::HashMap;
+use std::path::{Path, PathBuf};
 
 mod jjgraph;
 
@@ -11,16 +14,37 @@ const MAX_NODES: usize = 100;
 // type GraphType = egui_graphs::Graph<CommitId, (), petgraph::Undirected>;
 type GraphType = egui_graphs::Graph<CommitId, (), petgraph::Directed>;
 
-fn main() -> eframe::Result {
+#[derive(Parser)]
+#[command(name = "Revset Explorer")]
+struct Args {
+    /// Path to the JJ repository to explore
+    #[arg(short = 'R', long, default_value = ".")]
+    repository: PathBuf,
+}
+
+fn main() -> anyhow::Result<()> {
+    let args = Args::parse();
+
+    let repo_path = args
+        .repository
+        .canonicalize()
+        .context("Cannot find the specified repository")?;
+    println!("Using repository in {}", repo_path.display());
+
     let options = eframe::NativeOptions {
         viewport: egui::ViewportBuilder::default().with_inner_size([1024., 768.]),
         ..Default::default()
     };
     eframe::run_native(
-        "Revset Explorer",
+        &format!(
+            "Revset Explorer - {}",
+            repo_path.file_name().unwrap_or_default().display()
+        ),
         options,
-        Box::new(|_cc| Ok(Box::<ExplorerApp>::default())),
+        Box::new(|_cc| Ok(Box::new(ExplorerApp::new(&repo_path)))),
     )
+    .unwrap();
+    Ok(())
 }
 
 struct ExplorerApp {
@@ -44,29 +68,6 @@ impl RevsetEntry {
             value: initial_value.to_owned(),
             old_value: "".to_owned(),
             error: None,
-        }
-    }
-}
-
-impl Default for ExplorerApp {
-    fn default() -> Self {
-        let initial_filter = "@".to_owned();
-        // This is the default log macro in jj: present(@) | ancestors(immutable_heads().., 2) | present(trunk())
-        let initial_view =
-            "present(@) | ancestors(immutable_heads().., 5) | present(trunk())".to_owned();
-        let jj_graph = jjgraph::JjGraph::new().unwrap();
-        let (g, node_idxs, _) = create_graph(&jj_graph, &initial_view).unwrap();
-        let repo = jj_graph.get_repo();
-        let working_copy_commit_id = repo
-            .view()
-            .get_wc_commit_id(jj_lib::ref_name::WorkspaceName::DEFAULT);
-        Self {
-            filter_revset: RevsetEntry::new(&initial_filter),
-            view_revset: RevsetEntry::new(&initial_view),
-            graph: g,
-            node_idxs,
-            jj_graph,
-            working_copy_commit_id: working_copy_commit_id.cloned(),
         }
     }
 }
@@ -155,6 +156,27 @@ enum MarkError {
 }
 
 impl ExplorerApp {
+    fn new(repository_path: &Path) -> Self {
+        let initial_filter = "@".to_owned();
+        // This is the default log macro in jj: present(@) | ancestors(immutable_heads().., 2) | present(trunk())
+        let initial_view =
+            "present(@) | ancestors(immutable_heads().., 5) | present(trunk())".to_owned();
+        let jj_graph = jjgraph::JjGraph::new(repository_path).unwrap();
+        let (g, node_idxs, _) = create_graph(&jj_graph, &initial_view).unwrap();
+        let repo = jj_graph.get_repo();
+        let working_copy_commit_id = repo
+            .view()
+            .get_wc_commit_id(jj_lib::ref_name::WorkspaceName::DEFAULT);
+        Self {
+            filter_revset: RevsetEntry::new(&initial_filter),
+            view_revset: RevsetEntry::new(&initial_view),
+            graph: g,
+            node_idxs,
+            jj_graph,
+            working_copy_commit_id: working_copy_commit_id.cloned(),
+        }
+    }
+
     fn mark_graph(&mut self) -> anyhow::Result<(), MarkError> {
         let filter_revset = self.jj_graph.get_revset(&self.filter_revset.value);
 
