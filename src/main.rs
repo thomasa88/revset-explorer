@@ -347,10 +347,10 @@ impl eframe::App for ExplorerApp {
             revset_edit(ui, "Select: ", &mut self.filter_revset);
             revset_edit(ui, "View: ", &mut self.view_revset);
 
-            let navigation = egui_graphs::SettingsNavigation::default()
+            let graph_navigation = egui_graphs::SettingsNavigation::default()
                 .with_fit_to_screen_enabled(true)
                 .with_zoom_and_pan_enabled(true);
-            let interaction = egui_graphs::SettingsInteraction::default()
+            let graph_interaction = egui_graphs::SettingsInteraction::default()
                 .with_dragging_enabled(false)
                 .with_edge_clicking_enabled(false)
                 .with_edge_selection_enabled(false)
@@ -358,7 +358,7 @@ impl eframe::App for ExplorerApp {
                 .with_node_clicking_enabled(false)
                 .with_node_selection_enabled(false);
 
-            let mut view = egui_graphs::GraphView::<
+            let mut graph_view = egui_graphs::GraphView::<
                 _,
                 _,
                 _,
@@ -368,10 +368,10 @@ impl eframe::App for ExplorerApp {
                 egui_graphs::LayoutStateHierarchical,
                 egui_graphs::LayoutHierarchical,
             >::new(&mut self.graph)
-            .with_navigations(&navigation)
-            .with_interactions(&interaction)
+            .with_navigations(&graph_navigation)
+            .with_interactions(&graph_interaction)
             .with_styles(&egui_graphs::SettingsStyle::default().with_labels_always(true));
-            ui.add(&mut view);
+            ui.add(&mut graph_view);
         });
     }
 }
