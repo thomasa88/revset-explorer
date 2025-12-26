@@ -196,8 +196,11 @@ enum MarkError {
 impl ExplorerApp {
     fn new(repository_path: &Path) -> Self {
         let initial_filter = "".to_owned();
-        let initial_view =
-            "present(@) | ancestors(immutable_heads().., 5) | present(trunk())".to_owned();
+        // This is the default log macro in jj: present(@) |
+        // ancestors(immutable_heads().., 2) | present(trunk())
+        // Set up something that will show the user's commits and a bit into the
+        // past, without filling up the view with too many nodes.
+        let initial_view = "ancestors(heads(mutable()), 7)".to_owned();
         let jj_graph = jjgraph::JjGraph::new(repository_path).unwrap();
         let (g, node_idxs, _) = create_graph(&jj_graph, &initial_view).unwrap();
         let repo = jj_graph.get_repo();
