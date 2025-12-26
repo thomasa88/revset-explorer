@@ -6,6 +6,7 @@ use jj_lib::repo::Repo;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+mod history;
 mod jjgraph;
 
 const MAX_NODES: usize = 100;
@@ -82,6 +83,7 @@ fn create_sample_repo() -> Result<(), anyhow::Error> {
 }
 
 struct ExplorerApp {
+    initialized: bool,
     filter_revset: RevsetEntry,
     view_revset: RevsetEntry,
     graph: GraphType,
@@ -90,18 +92,20 @@ struct ExplorerApp {
     working_copy_commit_id: Option<CommitId>,
 }
 
+const HISTORY_SIZE: usize = 50;
 struct RevsetEntry {
     value: String,
-    old_value: String,
     error: Option<String>,
+    // History of previous values
+    history: history::History,
 }
 
 impl RevsetEntry {
     fn new(initial_value: &str) -> Self {
         Self {
             value: initial_value.to_owned(),
-            old_value: "".to_owned(),
             error: None,
+            history: history::History::new(HISTORY_SIZE),
         }
     }
 }
@@ -202,6 +206,7 @@ impl ExplorerApp {
             .view()
             .get_wc_commit_id(jj_lib::ref_name::WorkspaceName::DEFAULT);
         Self {
+            initialized: false,
             filter_revset: RevsetEntry::new(&initial_filter),
             view_revset: RevsetEntry::new(&initial_view),
             graph: g,
@@ -288,35 +293,100 @@ impl ExplorerApp {
     }
 }
 
+/// Revset text edit box with error message display
+fn revset_edit(
+    ui: &mut egui::Ui,
+    label: &str,
+    value: &mut String,
+    error: &Option<String>,
+) -> egui::Response {
+    ui.horizontal(|ui| {
+        let revset_label = ui.label(label);
+        let response = ui
+            .scope(|ui| {
+                if error.is_some() {
+                    ui.visuals_mut().extreme_bg_color = ecolor::Color32::DARK_RED;
+                }
+                ui.add(
+                    egui::TextEdit::singleline(value)
+                        .desired_width(600.)
+                        .cursor_at_end(true)
+                        .hint_text(
+                            "Enter a revset here. Navigate to previous entries using up/down.",
+                        ),
+                )
+                .labelled_by(revset_label.id)
+            })
+            .inner;
+        let err_msg = if let Some(err_msg) = error.as_ref() {
+            // Remove empty lines, to make the error message more compact
+            err_msg.replace("  |\n", "")
+        } else {
+            "".to_owned()
+        };
+        let _error_label = ui.add_sized(
+            [1., ui.text_style_height(&egui::TextStyle::Monospace) * 4.],
+            egui::Label::new(RichText::new(err_msg).family(egui::FontFamily::Monospace)),
+        );
+        response
+    })
+    .inner
+}
+
+fn revset_edit_with_history(
+    ui: &mut egui::Ui,
+    label: &str,
+    revset_entry: &mut RevsetEntry,
+) -> (egui::Response, bool) {
+    let resp = revset_edit(
+        ui,
+        &format!("{}: ", label),
+        &mut revset_entry.value,
+        &revset_entry.error,
+    );
+
+    let mut value_from_history = false;
+    let mut value_changed = false;
+
+    if resp.has_focus() {
+        if ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp)) {
+            revset_entry.history.prev();
+            revset_entry.value = revset_entry.history.get().to_owned();
+            value_from_history = true;
+        } else if ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown)) {
+            revset_entry.history.next();
+            revset_entry.value = revset_entry.history.get().to_owned();
+            value_from_history = true;
+        }
+    }
+
+    if value_from_history {
+        value_changed = true;
+        // Move cursor to the end of the textbox
+        if let Some(mut s) = egui::text_edit::TextEdit::load_state(&resp.ctx, resp.id) {
+            s.cursor.set_char_range(Some(egui::text::CCursorRange::one(
+                egui::text::CCursor::new(revset_entry.value.len()),
+            )));
+            s.store(&resp.ctx, resp.id);
+        }
+    } else if resp.changed() {
+        value_changed = true;
+        revset_entry.history.add(&revset_entry.value.trim(), false);
+    }
+    (resp, value_changed)
+}
+
 impl eframe::App for ExplorerApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
-        let revset_edit = |ui: &mut egui::Ui, label: &str, revset: &mut RevsetEntry| {
-            ui.horizontal(|ui| {
-                let revset_label = ui.label(label);
-                ui.scope(|ui| {
-                    if revset.error.is_some() {
-                        ui.visuals_mut().extreme_bg_color = ecolor::Color32::DARK_RED;
-                    }
-                    ui.add(egui::TextEdit::singleline(&mut revset.value).desired_width(600.))
-                        .labelled_by(revset_label.id);
-                });
-                let err_msg = if let Some(err_msg) = revset.error.as_ref() {
-                    // Remove empty lines, to make the error message more compact
-                    err_msg.replace("  |\n", "")
-                } else {
-                    "".to_owned()
-                };
-                let _error_label = ui.add_sized(
-                    [1., ui.text_style_height(&egui::TextStyle::Monospace) * 4.],
-                    egui::Label::new(RichText::new(err_msg).family(egui::FontFamily::Monospace)),
-                );
-            });
-        };
-
         egui::CentralPanel::default().show(ctx, |ui| {
-            let view_updated = self.view_revset.value != self.view_revset.old_value;
-            if view_updated {
+            let (filter_edit, filter_changed) = revset_edit_with_history(ui, "Select: ", &mut self.filter_revset);
+            let (_view_edit, view_changed) = revset_edit_with_history(ui, "View: ", &mut self.view_revset);
+
+            if view_changed || !self.initialized {
                 let create_result = create_graph(&self.jj_graph, &self.view_revset.value);
+                if create_result.is_err() {
+                    self.view_revset.history.set_last_tentative(true);
+                }
                 self.view_revset.error = match create_result {
                     Ok((g, node_idxs, limit_hit)) => {
                         self.graph = g;
@@ -331,21 +401,24 @@ impl eframe::App for ExplorerApp {
                     Err(CreateError::RevsetParseError(msg)) => Some(msg),
                     Err(CreateError::JjError(msg)) => Some(msg),
                 };
-                self.view_revset.old_value = self.view_revset.value.clone();
             }
 
-            if view_updated || self.filter_revset.value != self.filter_revset.old_value {
+            if filter_changed || view_changed || !self.initialized {
                 let update_result = self.mark_graph();
+                if update_result.is_err() {
+                    self.filter_revset.history.set_last_tentative(true);
+                }
                 self.filter_revset.error = match update_result {
                     Ok(()) => None,
                     Err(MarkError::RevsetParseError(msg)) => Some(msg),
                     Err(MarkError::JjError) => None,
                 };
-                self.filter_revset.old_value = self.filter_revset.value.clone();
             }
 
-            revset_edit(ui, "Select: ", &mut self.filter_revset);
-            revset_edit(ui, "View: ", &mut self.view_revset);
+            if !self.initialized {
+                filter_edit.request_focus();
+                self.initialized = true;
+            }
 
             let graph_navigation = egui_graphs::SettingsNavigation::default()
                 .with_fit_to_screen_enabled(true)
