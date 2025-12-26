@@ -195,8 +195,7 @@ enum MarkError {
 
 impl ExplorerApp {
     fn new(repository_path: &Path) -> Self {
-        let initial_filter = "@".to_owned();
-        // This is the default log macro in jj: present(@) | ancestors(immutable_heads().., 2) | present(trunk())
+        let initial_filter = "".to_owned();
         let initial_view =
             "present(@) | ancestors(immutable_heads().., 5) | present(trunk())".to_owned();
         let jj_graph = jjgraph::JjGraph::new(repository_path).unwrap();
@@ -285,7 +284,9 @@ impl ExplorerApp {
             node.set_color(color_map[&(node_type, filter_match)]);
         }
 
-        if let Some(e) = revset_parse_error {
+        if let Some(e) = revset_parse_error
+            && !self.filter_revset.value.is_empty()
+        {
             Err(MarkError::RevsetParseError(e.to_string()))
         } else {
             Ok(())
@@ -312,7 +313,7 @@ fn revset_edit(
                         .desired_width(600.)
                         .cursor_at_end(true)
                         .hint_text(
-                            "Enter a revset here. Navigate to previous entries using up/down.",
+                            "Enter a revset here, like \"@\". Navigate to previous entries using up/down keys.",
                         ),
                 )
                 .labelled_by(revset_label.id)
@@ -379,8 +380,10 @@ fn revset_edit_with_history(
 impl eframe::App for ExplorerApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         egui::CentralPanel::default().show(ctx, |ui| {
-            let (filter_edit, filter_changed) = revset_edit_with_history(ui, "Select: ", &mut self.filter_revset);
-            let (_view_edit, view_changed) = revset_edit_with_history(ui, "View: ", &mut self.view_revset);
+            let (filter_edit, filter_changed) =
+                revset_edit_with_history(ui, "Select: ", &mut self.filter_revset);
+            let (_view_edit, view_changed) =
+                revset_edit_with_history(ui, "View: ", &mut self.view_revset);
 
             if view_changed || !self.initialized {
                 let create_result = create_graph(&self.jj_graph, &self.view_revset.value);
