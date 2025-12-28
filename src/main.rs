@@ -67,7 +67,7 @@ fn create_sample_repo() -> Result<(), anyhow::Error> {
     let sample_script = include_str!("create_sample_repo.sh");
     let output = std::process::Command::new("bash")
         .arg("-c")
-        .arg(&sample_script)
+        .arg(sample_script)
         .stderr(std::process::Stdio::piped())
         .spawn()?
         .wait_with_output()?;
@@ -375,7 +375,7 @@ fn revset_edit_with_history(
         }
     } else if resp.changed() {
         value_changed = true;
-        revset_entry.history.add(&revset_entry.value.trim(), false);
+        revset_entry.history.add(revset_entry.value.trim(), false);
     }
     (resp, value_changed)
 }
@@ -399,7 +399,7 @@ impl eframe::App for ExplorerApp {
                         self.node_idxs = node_idxs;
                         egui_graphs::reset_layout::<egui_graphs::LayoutStateHierarchical>(ui, None);
                         if limit_hit {
-                            Some(format!("Node limit reached. The graph is incomplete."))
+                            Some("Node limit reached. The graph is incomplete.".to_string())
                         } else {
                             None
                         }
