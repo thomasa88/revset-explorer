@@ -427,7 +427,8 @@ impl eframe::App for ExplorerApp {
             }
 
             let graph_navigation = egui_graphs::SettingsNavigation::default()
-                .with_fit_to_screen_enabled(true)
+                // Disable fit to screen by default, as it hinders zoom and pan
+                .with_fit_to_screen_enabled(view_changed)
                 .with_zoom_and_pan_enabled(true);
             let graph_interaction = egui_graphs::SettingsInteraction::default()
                 .with_dragging_enabled(false)
