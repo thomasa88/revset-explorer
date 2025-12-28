@@ -31,8 +31,8 @@ impl History {
         self.view_pos = self.items.len() - 1;
     }
 
-    pub fn get(&self) -> &str {
-        &self.items[self.view_pos]
+    pub fn get(&self) -> Option<&str> {
+        self.items.get(self.view_pos).map(|s| s.as_str())
     }
 
     pub fn set_last_tentative(&mut self, is_tentative: bool) {
@@ -44,7 +44,7 @@ impl History {
     }
 
     pub fn next(&mut self) {
-        if self.view_pos < self.items.len() - 1 {
+        if self.view_pos + 1 < self.items.len() {
             self.view_pos += 1;
         }
     }
@@ -86,7 +86,7 @@ mod tests {
         let mut h = History::new(10);
         h.add("@", false);
         h.add("@-", false);
-        assert_eq!(h.get(), "@-");
+        assert_eq!(h.get(), Some("@-"));
     }
 
     #[test]
@@ -95,11 +95,11 @@ mod tests {
         h.add("@", false);
         h.add("@-", false);
         h.add("@--", false);
-        assert_eq!(h.get(), "@--");
+        assert_eq!(h.get(), Some("@--"));
         h.prev();
-        assert_eq!(h.get(), "@-");
+        assert_eq!(h.get(), Some("@-"));
         h.prev();
-        assert_eq!(h.get(), "@");
+        assert_eq!(h.get(), Some("@"));
     }
 
     #[test]
@@ -108,7 +108,7 @@ mod tests {
         h.add("@", false);
         h.prev();
         h.prev();
-        assert_eq!(h.get(), "@");
+        assert_eq!(h.get(), Some("@"));
     }
 
     #[test]
@@ -119,11 +119,11 @@ mod tests {
         h.add("@--", false);
         h.prev();
         h.prev();
-        assert_eq!(h.get(), "@");
+        assert_eq!(h.get(), Some("@"));
         h.next();
-        assert_eq!(h.get(), "@-");
+        assert_eq!(h.get(), Some("@-"));
         h.next();
-        assert_eq!(h.get(), "@--");
+        assert_eq!(h.get(), Some("@--"));
     }
 
     #[test]
@@ -131,7 +131,15 @@ mod tests {
         let mut h = History::new(10);
         h.add("@", false);
         h.next();
-        assert_eq!(h.get(), "@");
+        assert_eq!(h.get(), Some("@"));
+    }
+
+    #[test]
+    fn next_when_empty() {
+        // Should not crash
+        let mut h = History::new(10);
+        h.next();
+        h.get();
     }
 
     #[test]

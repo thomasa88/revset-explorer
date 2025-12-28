@@ -355,11 +355,11 @@ fn revset_edit_with_history(
     if resp.has_focus() {
         if ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowUp)) {
             revset_entry.history.prev();
-            revset_entry.value = revset_entry.history.get().to_owned();
+            revset_entry.value = revset_entry.history.get().unwrap_or("").to_owned();
             value_from_history = true;
         } else if ui.input_mut(|i| i.consume_key(egui::Modifiers::NONE, egui::Key::ArrowDown)) {
             revset_entry.history.next();
-            revset_entry.value = revset_entry.history.get().to_owned();
+            revset_entry.value = revset_entry.history.get().unwrap_or("").to_owned();
             value_from_history = true;
         }
     }
