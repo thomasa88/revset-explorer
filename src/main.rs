@@ -6,14 +6,17 @@ use jj_lib::repo::Repo;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 
+use crate::node_shape::NodeShape;
+
 mod history;
 mod jjgraph;
+mod node_shape;
 
 const MAX_NODES: usize = 100;
 
 // The undirected graph does not put nodes in nice positions when rendering a hierarchical graph view.
 // type GraphType = egui_graphs::Graph<CommitId, (), petgraph::Undirected>;
-type GraphType = egui_graphs::Graph<CommitId, (), petgraph::Directed>;
+type GraphType = egui_graphs::Graph<CommitId, (), petgraph::Directed, petgraph::csr::DefaultIx, NodeShape>;
 
 #[derive(Parser)]
 #[command(name = "Revset Explorer")]
@@ -443,7 +446,7 @@ impl eframe::App for ExplorerApp {
                 _,
                 _,
                 _,
-                _,
+                NodeShape,
                 _,
                 egui_graphs::LayoutStateHierarchical,
                 egui_graphs::LayoutHierarchical,
@@ -451,6 +454,9 @@ impl eframe::App for ExplorerApp {
             .with_navigations(&graph_navigation)
             .with_interactions(&graph_interaction)
             .with_styles(&egui_graphs::SettingsStyle::default().with_labels_always(true));
+            let mut s = egui_graphs::get_layout_state::<egui_graphs::LayoutStateHierarchical>(ui, None);
+            s.center_parent = true;
+            egui_graphs::set_layout_state(ui, s, None);
             ui.add(&mut graph_view);
         });
     }
