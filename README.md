@@ -18,7 +18,7 @@ The window that opens shows a part of the commit tree, as decided by the "view" 
 
 ![Screenshot](screenshot.png)
 
-Now you can enter your desired [revset](https://docs.jj-vcs.dev/latest/revsets/) in the "filter" input. Nodes matching your filter will be highlighted.
+Now you can enter your desired [revset](https://docs.jj-vcs.dev/latest/revsets/) in the "select" input. Nodes matching your filter will be highlighted. The time taken to resolve the revset is shown next to the text box. The value is averaged if the calculation time is not greater than 100 ms.
 
 Use the "view" input to change what nodes are shown in the program.
 
@@ -51,3 +51,5 @@ Edited28m
 * Better sample repository
 
 * Make sample repository creation cross-platform
+
+* Do revset calculation time iterations in a separate task or thread.
