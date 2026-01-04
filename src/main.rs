@@ -20,6 +20,11 @@ const MAX_NODES: usize = 100;
 type GraphType =
     egui_graphs::Graph<CommitId, (), petgraph::Directed, petgraph::csr::DefaultIx, NodeShape>;
 
+enum NodeCount {
+    Exact(usize),
+    AtLeast(usize),
+}
+
 #[derive(Parser)]
 #[command(name = "Revset Explorer")]
 struct Args {
@@ -91,6 +96,7 @@ struct ExplorerApp {
     initialized: bool,
     filter_revset: RevsetEntry,
     last_filter_calc_time: Option<Duration>,
+    last_filter_node_count: Option<NodeCount>,
     view_revset: RevsetEntry,
     graph: GraphType,
     node_idxs: Vec<petgraph::graph::NodeIndex>,
@@ -194,7 +200,7 @@ fn create_graph(
 }
 
 #[derive(Debug, PartialEq)]
-enum MarkError {
+enum ResolveError {
     RevsetParseError(String),
     JjError,
 }
@@ -217,6 +223,7 @@ impl ExplorerApp {
             initialized: false,
             filter_revset: RevsetEntry::new(&initial_filter),
             last_filter_calc_time: None,
+            last_filter_node_count: None,
             view_revset: RevsetEntry::new(&initial_view),
             graph: g,
             node_idxs,
@@ -224,81 +231,61 @@ impl ExplorerApp {
             working_copy_commit_id: working_copy_commit_id.cloned(),
         }
     }
+}
 
-    fn mark_graph(&mut self) -> anyhow::Result<std::time::Duration, MarkError> {
-        let (filter_revset, first_calc_time) =
-            get_revset_timed(&self.jj_graph, &self.filter_revset.value);
+fn mark_graph<'a>(
+    graph: &mut GraphType,
+    node_idxs: &[petgraph::graph::NodeIndex],
+    working_copy_commit_id: Option<&CommitId>,
+    jj_graph: &jjgraph::JjGraph,
+    filter_revset: Option<Box<dyn jj_lib::revset::Revset + 'a>>,
+) -> anyhow::Result<(), ResolveError> {
+    // TODO: Global var
+    let immutable_revset = jj_graph
+        .get_revset("immutable()")
+        .map_err(|_| ResolveError::JjError)?;
+    let is_immutable = immutable_revset.containing_fn();
 
-        #[expect(clippy::type_complexity)]
-        let (in_filter, revset_parse_error): (Box<dyn Fn(&CommitId) -> Result<_, _>>, _) =
-            match filter_revset {
-                Ok(filter_revset) => (filter_revset.containing_fn(), None),
-                Err(e) => (
-                    // Revset is bad, so unmark all nodes
-                    Box::new(|_| Ok(false)),
-                    Some(e),
-                ),
-            };
+    let in_filter: Box<dyn Fn(&CommitId) -> Result<_, _>> =
+        if let Some(filter_revset) = filter_revset {
+            filter_revset.containing_fn()
+        } else {
+            Box::new(|_| Ok(false))
+        };
 
-        // Find average calculation time
-        let mut total_time = first_calc_time;
-        let mut run_count = 1;
-        if revset_parse_error.is_none() {
-            for _ in 0..100 {
-                if total_time > Duration::from_millis(100) {
-                    // Don't let the user wait too long
-                    // TODO: Do calculation in a background task
-                    break;
-                }
-                let (_, calc_time) = get_revset_timed(&self.jj_graph, &self.filter_revset.value);
-                run_count += 1;
-                total_time += calc_time;
-            }
+    for node_idx in node_idxs.iter() {
+        let node = graph.node_mut(*node_idx).unwrap();
+        let commit_id = node.payload();
+        let immutable = is_immutable(commit_id).map_err(|_| ResolveError::JjError)?;
+        let matches_filter = in_filter(commit_id).map_err(|_| ResolveError::JjError)?;
+        let is_wc_commit = working_copy_commit_id
+            .as_ref()
+            .is_some_and(|wc| commit_id == *wc);
+
+        #[derive(Debug, PartialEq, Eq, Hash)]
+        enum NodeType {
+            WorkingCopy,
+            Immutable,
+            Regular,
         }
-        let avg_time = total_time.checked_div(run_count).unwrap();
-
-        // TODO: Global var
-        let immutable_revset = self
-            .jj_graph
-            .get_revset("immutable()")
-            .map_err(|_| MarkError::JjError)?;
-
-        let is_immutable = immutable_revset.containing_fn();
-
-        for node_idx in self.node_idxs.iter() {
-            let node = self.graph.node_mut(*node_idx).unwrap();
-            let commit_id = node.payload();
-            let immutable = is_immutable(commit_id).map_err(|_| MarkError::JjError)?;
-            let matches_filter = in_filter(commit_id).map_err(|_| MarkError::JjError)?;
-            let is_wc_commit = self
-                .working_copy_commit_id
-                .as_ref()
-                .is_some_and(|wc| commit_id == wc);
-
-            #[derive(Debug, PartialEq, Eq, Hash)]
-            enum NodeType {
-                WorkingCopy,
-                Immutable,
-                Regular,
-            }
-            #[derive(Debug, PartialEq, Eq, Hash)]
-            enum FilterMatch {
-                Match,
-                NoMatch,
-            }
-            let node_type = if is_wc_commit {
-                NodeType::WorkingCopy
-            } else if immutable {
-                NodeType::Immutable
-            } else {
-                NodeType::Regular
-            };
-            let filter_match = if matches_filter {
-                FilterMatch::Match
-            } else {
-                FilterMatch::NoMatch
-            };
-            #[rustfmt::skip]
+        #[derive(Debug, PartialEq, Eq, Hash)]
+        enum FilterMatch {
+            Match,
+            NoMatch,
+        }
+        let node_type = if is_wc_commit {
+            NodeType::WorkingCopy
+        } else if immutable {
+            NodeType::Immutable
+        } else {
+            NodeType::Regular
+        };
+        let filter_match = if matches_filter {
+            FilterMatch::Match
+        } else {
+            FilterMatch::NoMatch
+        };
+        #[rustfmt::skip]
             let color_map = HashMap::from([
                 ((NodeType::WorkingCopy, FilterMatch::Match), ecolor::Color32::from_hex("#26ff00ff").unwrap()),
                 ((NodeType::WorkingCopy, FilterMatch::NoMatch), ecolor::Color32::from_hex("#295923").unwrap()),
@@ -309,29 +296,65 @@ impl ExplorerApp {
                 // ((NodeType::Regular, FilterMatch::Match), ecolor::Color32::from_hex("#ffa400").unwrap()),
                 // ((NodeType::Regular, FilterMatch::NoMatch), ecolor::Color32::from_hex("#634c22").unwrap()),
             ]);
-            node.set_color(color_map[&(node_type, filter_match)]);
-        }
-
-        if let Some(e) = revset_parse_error
-            && !self.filter_revset.value.is_empty()
-        {
-            Err(MarkError::RevsetParseError(e.to_string()))
-        } else {
-            Ok(avg_time)
-        }
+        node.set_color(color_map[&(node_type, filter_match)]);
     }
+    Ok(())
 }
+
+fn resolve_filter_revset<'g>(
+    jj_graph: &'g jjgraph::JjGraph,
+    revset_str: &str,
+) -> Result<
+    (
+        Option<Box<dyn jj_lib::revset::Revset + 'g>>,
+        Duration,
+        NodeCount,
+    ),
+    ResolveError,
+> {
+    if revset_str.is_empty() {
+        return Ok((None, Duration::from_millis(0), NodeCount::Exact(0)));
+    }
+
+    let (filter_revset, first_calc_time) = get_revset_timed(jj_graph, revset_str)
+        .map_err(|e| ResolveError::RevsetParseError(e.to_string()))?;
+
+    // Find average calculation time
+    let mut total_time = first_calc_time;
+    let mut run_count = 1;
+    for _ in 0..100 {
+        if total_time > Duration::from_millis(100) {
+            // Don't let the user wait too long
+            // TODO: Do calculation in a background task
+            break;
+        }
+        let (_, calc_time) =
+            get_revset_timed(jj_graph, revset_str).map_err(|_| ResolveError::JjError)?;
+        run_count += 1;
+        total_time += calc_time;
+    }
+    let avg_time = total_time.checked_div(run_count).unwrap();
+
+    let node_count = filter_revset
+        .count_estimate()
+        .map_err(|_| ResolveError::JjError)?;
+    let node_count = if Some(node_count.0) == node_count.1 {
+        NodeCount::Exact(node_count.0)
+    } else {
+        NodeCount::AtLeast(node_count.0)
+    };
+
+    Ok((Some(filter_revset), avg_time, node_count))
+}
+
 fn get_revset_timed<'a>(
     jj_graph: &'a jjgraph::JjGraph,
     value: &str,
-) -> (
-    Result<Box<dyn jj_lib::revset::Revset + 'a>, jjgraph::RevsetError>,
-    Duration,
-) {
+) -> Result<(Box<dyn jj_lib::revset::Revset + 'a>, Duration), jjgraph::RevsetError> {
     let start = Instant::now();
-    let revset = jj_graph.get_revset(value);
+    let revset = jj_graph.get_revset(value)?;
     let end = Instant::now();
-    (revset, end - start)
+    Ok((revset, end - start))
 }
 
 /// Revset text edit box with error message display
@@ -341,6 +364,7 @@ fn revset_edit(
     value: &mut String,
     error: &Option<String>,
     calculation_time: Option<Duration>,
+    node_count: Option<&NodeCount>,
 ) -> egui::Response {
     ui.horizontal(|ui| {
         let revset_label = ui.label(label);
@@ -366,6 +390,12 @@ fn revset_edit(
         } else {
             "".to_owned()
         };
+        if err_msg.is_empty() && let Some(count) = node_count {
+            ui.label(match count {
+                NodeCount::Exact(count) => format!("{count}"),
+                NodeCount::AtLeast(count) => format!("{count}+"),
+            });
+        }
         if err_msg.is_empty() && let Some(time) = calculation_time {
             ui.label(format!("{:.1} ms", time.as_micros() as f64 / 1000.0));
         }
@@ -383,6 +413,7 @@ fn revset_edit_with_history(
     label: &str,
     revset_entry: &mut RevsetEntry,
     calculation_time: Option<Duration>,
+    node_count: Option<&NodeCount>,
 ) -> (egui::Response, bool) {
     let resp = revset_edit(
         ui,
@@ -390,6 +421,7 @@ fn revset_edit_with_history(
         &mut revset_entry.value,
         &revset_entry.error,
         calculation_time,
+        node_count,
     );
 
     let mut value_from_history = false;
@@ -431,9 +463,10 @@ impl eframe::App for ExplorerApp {
                 "Select",
                 &mut self.filter_revset,
                 self.last_filter_calc_time,
+                self.last_filter_node_count.as_ref(),
             );
             let (_view_edit, view_changed) =
-                revset_edit_with_history(ui, "View", &mut self.view_revset, None);
+                revset_edit_with_history(ui, "View", &mut self.view_revset, None, None);
 
             if view_changed || !self.initialized {
                 let create_result = create_graph(&self.jj_graph, &self.view_revset.value);
@@ -457,19 +490,36 @@ impl eframe::App for ExplorerApp {
             }
 
             if filter_changed || view_changed || !self.initialized {
-                let update_result = self.mark_graph();
-                if update_result.is_err() {
-                    self.filter_revset.history.set_last_tentative(true);
-                    self.last_filter_calc_time = None;
-                }
-                self.filter_revset.error = match update_result {
-                    Ok(duration) => {
-                        self.last_filter_calc_time = Some(duration);
-                        None
+                let resolve_result =
+                    resolve_filter_revset(&self.jj_graph, &self.filter_revset.value);
+                match resolve_result {
+                    Ok((filter_revset, calc_time, node_count)) => {
+                        let _ = mark_graph(
+                            &mut self.graph,
+                            &self.node_idxs,
+                            self.working_copy_commit_id.as_ref(),
+                            &self.jj_graph,
+                            filter_revset,
+                        );
+                        self.last_filter_calc_time = Some(calc_time);
+                        self.last_filter_node_count = Some(node_count);
+                        self.filter_revset.error = None;
                     }
-                    Err(MarkError::RevsetParseError(msg)) => Some(msg),
-                    Err(MarkError::JjError) => None,
-                };
+                    Err(e) => {
+                        self.last_filter_calc_time = None;
+                        self.last_filter_node_count = None;
+                        self.filter_revset.history.set_last_tentative(true);
+
+                        match e {
+                            ResolveError::RevsetParseError(msg) => {
+                                self.filter_revset.error = Some(msg);
+                            }
+                            ResolveError::JjError => {
+                                self.filter_revset.error = None;
+                            }
+                        }
+                    }
+                }
             }
 
             if !self.initialized {
