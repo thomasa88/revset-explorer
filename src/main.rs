@@ -428,12 +428,12 @@ impl eframe::App for ExplorerApp {
         egui::CentralPanel::default().show(ctx, |ui| {
             let (filter_edit, filter_changed) = revset_edit_with_history(
                 ui,
-                "Select: ",
+                "Select",
                 &mut self.filter_revset,
                 self.last_filter_calc_time,
             );
             let (_view_edit, view_changed) =
-                revset_edit_with_history(ui, "View: ", &mut self.view_revset, None);
+                revset_edit_with_history(ui, "View", &mut self.view_revset, None);
 
             if view_changed || !self.initialized {
                 let create_result = create_graph(&self.jj_graph, &self.view_revset.value);
