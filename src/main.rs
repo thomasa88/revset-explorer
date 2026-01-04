@@ -244,7 +244,7 @@ impl ExplorerApp {
         let mut total_time = first_calc_time;
         let mut run_count = 1;
         if revset_parse_error.is_none() {
-            for _ in 0..10 {
+            for _ in 0..100 {
                 if total_time > Duration::from_millis(100) {
                     // Don't let the user wait too long
                     // TODO: Do calculation in a background task
@@ -367,7 +367,7 @@ fn revset_edit(
             "".to_owned()
         };
         if err_msg.is_empty() && let Some(time) = calculation_time {
-            ui.label(format!("{} ms", &time.as_millis()));
+            ui.label(format!("{:.1} ms", time.as_micros() as f64 / 1000.0));
         }
         let _error_label = ui.add_sized(
             [1., ui.text_style_height(&egui::TextStyle::Monospace) * 4.],
