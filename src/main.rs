@@ -130,7 +130,7 @@ impl RevsetEntry {
 fn create_graph<'a>(
     jj_graph: &jjgraph::JjGraph,
     all_revset: Box<dyn jj_lib::revset::Revset + 'a>,
-) -> Result<(GraphType, Vec<petgraph::graph::NodeIndex>, bool), ResolveError> {
+) -> Result<(GraphType, Vec<petgraph::graph::NodeIndex>, Option<usize>), ResolveError> {
     let mut graph: GraphType =
         egui_graphs::Graph::new(petgraph::stable_graph::StableGraph::default());
 
@@ -187,7 +187,11 @@ fn create_graph<'a>(
         graph.add_edge_with_label(*start, *end, (), "".to_owned());
     }
 
-    let limit_hit = node_idxs.len() == MAX_NODES;
+    let limit_hit = if node_idxs.len() == MAX_NODES {
+        Some(MAX_NODES)
+    } else {
+        None
+    };
 
     Ok((graph, node_idxs, limit_hit))
 }
@@ -236,33 +240,33 @@ impl ExplorerApp {
     fn update_view(&mut self, ui: &mut egui::Ui) {
         let result = self.update_view_graph(ui);
         match result {
-            Ok(node_count) => {
-                self.last_view_node_count = Some(node_count);
+            Ok(_) => {
                 self.view_revset.error = None;
             }
             Err(ResolveError::RevsetParseError(msg) | ResolveError::JjError(msg)) => {
-                self.last_view_node_count = None;
                 self.view_revset.history.set_last_tentative(true);
                 self.view_revset.error = Some(msg);
             }
         };
     }
 
-    fn update_view_graph(&mut self, ui: &mut egui::Ui) -> Result<NodeCount, ResolveError> {
-        let resolve_result = resolve_revset(&self.jj_graph, &self.view_revset.value)?;
+    fn update_view_graph(&mut self, ui: &mut egui::Ui) -> Result<(), ResolveError> {
+        let resolve_result = resolve_revset(&self.jj_graph, &self.view_revset.value)
+            .inspect_err(|_| self.last_view_node_count = None)?;
         let (revset, _calc_time, node_count) = resolve_result;
+        self.last_view_node_count = Some(node_count);
 
         let create_result = create_graph(&self.jj_graph, revset)?;
         let (g, node_idxs, limit_hit) = create_result;
         self.graph = g;
         self.node_idxs = node_idxs;
         egui_graphs::reset_layout::<egui_graphs::LayoutStateHierarchical>(ui, None);
-        if limit_hit {
-            Err(ResolveError::RevsetParseError(
-                "Node limit reached. The graph is incomplete.".to_owned(),
-            ))
+        if let Some(limit) = limit_hit {
+            Err(ResolveError::RevsetParseError(format!(
+                "Node limit of {limit} reached. The graph is incomplete."
+            )))
         } else {
-            Ok(node_count)
+            Ok(())
         }
     }
 
@@ -456,7 +460,7 @@ fn revset_edit(
         } else {
             "".to_owned()
         };
-        if err_msg.is_empty() && let Some(count) = node_count {
+        if let Some(count) = node_count {
             ui.label(match count {
                 NodeCount::Exact(count) => format!("{count} ○"),
                 NodeCount::AtLeast(count) => format!("{count}+ ○"),
