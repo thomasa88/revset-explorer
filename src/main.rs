@@ -98,6 +98,7 @@ struct ExplorerApp {
     last_filter_calc_time: Option<Duration>,
     last_filter_node_count: Option<NodeCount>,
     view_revset: RevsetEntry,
+    last_view_node_count: Option<NodeCount>,
     graph: GraphType,
     node_idxs: Vec<petgraph::graph::NodeIndex>,
     jj_graph: jjgraph::JjGraph,
@@ -122,22 +123,12 @@ impl RevsetEntry {
     }
 }
 
-#[derive(Debug, PartialEq)]
-enum CreateError {
-    RevsetParseError(String),
-    JjError(String),
-}
-
-fn create_graph(
+fn create_graph<'a>(
     jj_graph: &jjgraph::JjGraph,
-    revset_str: &str,
-) -> Result<(GraphType, Vec<petgraph::graph::NodeIndex>, bool), CreateError> {
+    all_revset: Box<dyn jj_lib::revset::Revset + 'a>,
+) -> Result<(GraphType, Vec<petgraph::graph::NodeIndex>, bool), ResolveError> {
     let mut graph: GraphType =
         egui_graphs::Graph::new(petgraph::stable_graph::StableGraph::default());
-
-    let all_revset = jj_graph
-        .get_revset(revset_str)
-        .map_err(|e| CreateError::RevsetParseError(e.to_string()))?;
 
     let repo = jj_graph.get_repo();
     let working_copy_commit_id = repo
@@ -149,16 +140,14 @@ fn create_graph(
     let mut edges = vec![];
     // TODO: Warn when max nodes is hit
     for rev in all_revset.iter_graph().take(MAX_NODES) {
-        let rev = rev.map_err(|e| CreateError::JjError(e.to_string()))?;
-        let commit_id = rev.0;
-        let commit_edges = rev.1;
+        let (commit_id, commit_edges) = rev?;
         let commit = store
             .get_commit(&commit_id)
-            .map_err(|e| CreateError::JjError(e.to_string()))?;
+            .map_err(|e| ResolveError::JjError(e.to_string()))?;
         let change_id = commit.change_id();
         let change_id_len = repo
             .shortest_unique_change_id_prefix_len(change_id)
-            .map_err(|e| CreateError::JjError(e.to_string()))?;
+            .map_err(|e| ResolveError::JjError(e.to_string()))?;
         let change_id_prefix = change_id.to_string()[..change_id_len].to_string();
 
         let mut desc: String = commit
@@ -202,7 +191,13 @@ fn create_graph(
 #[derive(Debug, PartialEq)]
 enum ResolveError {
     RevsetParseError(String),
-    JjError,
+    JjError(String),
+}
+
+impl From<jj_lib::revset::RevsetEvaluationError> for ResolveError {
+    fn from(e: jj_lib::revset::RevsetEvaluationError) -> Self {
+        ResolveError::JjError(e.to_string())
+    }
 }
 
 impl ExplorerApp {
@@ -214,7 +209,8 @@ impl ExplorerApp {
         // past, without filling up the view with too many nodes.
         let initial_view = "ancestors(heads(mutable()), 7)".to_owned();
         let jj_graph = jjgraph::JjGraph::new(repository_path).unwrap();
-        let (g, node_idxs, _) = create_graph(&jj_graph, &initial_view).unwrap();
+        let (view_revset, ..) = resolve_revset(&jj_graph, &initial_view).unwrap();
+        let (g, node_idxs, _) = create_graph(&jj_graph, view_revset).unwrap();
         let repo = jj_graph.get_repo();
         let working_copy_commit_id = repo
             .view()
@@ -225,10 +221,68 @@ impl ExplorerApp {
             last_filter_calc_time: None,
             last_filter_node_count: None,
             view_revset: RevsetEntry::new(&initial_view),
+            last_view_node_count: None,
             graph: g,
             node_idxs,
             jj_graph,
             working_copy_commit_id: working_copy_commit_id.cloned(),
+        }
+    }
+
+    fn update_view(&mut self, ui: &mut egui::Ui) {
+        let result = self.update_view_graph(ui);
+        match result {
+            Ok(node_count) => {
+                self.last_view_node_count = Some(node_count);
+                self.view_revset.error = None;
+            }
+            Err(ResolveError::RevsetParseError(msg) | ResolveError::JjError(msg)) => {
+                self.last_view_node_count = None;
+                self.view_revset.history.set_last_tentative(true);
+                self.view_revset.error = Some(msg);
+            }
+        };
+    }
+
+    fn update_view_graph(&mut self, ui: &mut egui::Ui) -> Result<NodeCount, ResolveError> {
+        let resolve_result = resolve_revset(&self.jj_graph, &self.view_revset.value)?;
+        let (revset, _calc_time, node_count) = resolve_result;
+
+        let create_result = create_graph(&self.jj_graph, revset)?;
+        let (g, node_idxs, limit_hit) = create_result;
+        self.graph = g;
+        self.node_idxs = node_idxs;
+        egui_graphs::reset_layout::<egui_graphs::LayoutStateHierarchical>(ui, None);
+        if limit_hit {
+            Err(ResolveError::RevsetParseError(
+                "Node limit reached. The graph is incomplete.".to_owned(),
+            ))
+        } else {
+            Ok(node_count)
+        }
+    }
+
+    fn update_filter(&mut self) {
+        let resolve_result = resolve_revset_measure(&self.jj_graph, &self.filter_revset.value);
+        match resolve_result {
+            Ok((filter_revset, calc_time, node_count)) => {
+                let _ = mark_graph(
+                    &mut self.graph,
+                    &self.node_idxs,
+                    self.working_copy_commit_id.as_ref(),
+                    &self.jj_graph,
+                    Some(filter_revset),
+                );
+                self.last_filter_calc_time = Some(calc_time);
+                self.last_filter_node_count = Some(node_count);
+                self.filter_revset.error = None;
+            }
+            Err(ResolveError::RevsetParseError(msg) | ResolveError::JjError(msg)) => {
+                self.last_filter_calc_time = None;
+                self.last_filter_node_count = None;
+                self.filter_revset.history.set_last_tentative(true);
+                self.filter_revset.error = Some(msg);
+            }
         }
     }
 }
@@ -243,7 +297,7 @@ fn mark_graph<'a>(
     // TODO: Global var
     let immutable_revset = jj_graph
         .get_revset("immutable()")
-        .map_err(|_| ResolveError::JjError)?;
+        .map_err(|e| ResolveError::JjError(e.to_string()))?;
     let is_immutable = immutable_revset.containing_fn();
 
     let in_filter: Box<dyn Fn(&CommitId) -> Result<_, _>> =
@@ -256,8 +310,8 @@ fn mark_graph<'a>(
     for node_idx in node_idxs.iter() {
         let node = graph.node_mut(*node_idx).unwrap();
         let commit_id = node.payload();
-        let immutable = is_immutable(commit_id).map_err(|_| ResolveError::JjError)?;
-        let matches_filter = in_filter(commit_id).map_err(|_| ResolveError::JjError)?;
+        let immutable = is_immutable(commit_id)?;
+        let matches_filter = in_filter(commit_id)?;
         let is_wc_commit = working_copy_commit_id
             .as_ref()
             .is_some_and(|wc| commit_id == *wc);
@@ -301,50 +355,58 @@ fn mark_graph<'a>(
     Ok(())
 }
 
-fn resolve_filter_revset<'g>(
+fn resolve_revset<'g>(
     jj_graph: &'g jjgraph::JjGraph,
     revset_str: &str,
-) -> Result<
-    (
-        Option<Box<dyn jj_lib::revset::Revset + 'g>>,
-        Duration,
-        NodeCount,
-    ),
-    ResolveError,
-> {
-    if revset_str.is_empty() {
-        return Ok((None, Duration::from_millis(0), NodeCount::Exact(0)));
-    }
+) -> Result<(Box<dyn jj_lib::revset::Revset + 'g>, Duration, NodeCount), ResolveError> {
+    resolve_revset_helper(jj_graph, revset_str, false)
+}
 
-    let (filter_revset, first_calc_time) = get_revset_timed(jj_graph, revset_str)
+/// Resolves the revset multiple times to measure average time
+fn resolve_revset_measure<'g>(
+    jj_graph: &'g jjgraph::JjGraph,
+    revset_str: &str,
+) -> Result<(Box<dyn jj_lib::revset::Revset + 'g>, Duration, NodeCount), ResolveError> {
+    resolve_revset_helper(jj_graph, revset_str, true)
+}
+
+fn resolve_revset_helper<'g>(
+    jj_graph: &'g jjgraph::JjGraph,
+    revset_str: &str,
+    measure: bool,
+) -> Result<(Box<dyn jj_lib::revset::Revset + 'g>, Duration, NodeCount), ResolveError> {
+    let revset_str = if revset_str.trim().is_empty() {
+        "empty()"
+    } else {
+        revset_str
+    };
+    let (filter_revset, first_calc_time) = get_revset_timed(jj_graph, &revset_str)
         .map_err(|e| ResolveError::RevsetParseError(e.to_string()))?;
 
-    // Find average calculation time
+    let runs = if measure { 100 } else { 1 };
     let mut total_time = first_calc_time;
     let mut run_count = 1;
-    for _ in 0..100 {
+    for _ in 0..(runs - 1) {
         if total_time > Duration::from_millis(100) {
             // Don't let the user wait too long
             // TODO: Do calculation in a background task
             break;
         }
-        let (_, calc_time) =
-            get_revset_timed(jj_graph, revset_str).map_err(|_| ResolveError::JjError)?;
+        let (_, calc_time) = get_revset_timed(jj_graph, revset_str)
+            .map_err(|e| ResolveError::RevsetParseError(e.to_string()))?;
         run_count += 1;
         total_time += calc_time;
     }
     let avg_time = total_time.checked_div(run_count).unwrap();
 
-    let node_count = filter_revset
-        .count_estimate()
-        .map_err(|_| ResolveError::JjError)?;
+    let node_count = filter_revset.count_estimate()?;
     let node_count = if Some(node_count.0) == node_count.1 {
         NodeCount::Exact(node_count.0)
     } else {
         NodeCount::AtLeast(node_count.0)
     };
 
-    Ok((Some(filter_revset), avg_time, node_count))
+    Ok((filter_revset, avg_time, node_count))
 }
 
 fn get_revset_timed<'a>(
@@ -392,8 +454,8 @@ fn revset_edit(
         };
         if err_msg.is_empty() && let Some(count) = node_count {
             ui.label(match count {
-                NodeCount::Exact(count) => format!("{count}"),
-                NodeCount::AtLeast(count) => format!("{count}+"),
+                NodeCount::Exact(count) => format!("{count} ○"),
+                NodeCount::AtLeast(count) => format!("{count}+ ○"),
             });
         }
         if err_msg.is_empty() && let Some(time) = calculation_time {
@@ -465,61 +527,19 @@ impl eframe::App for ExplorerApp {
                 self.last_filter_calc_time,
                 self.last_filter_node_count.as_ref(),
             );
-            let (_view_edit, view_changed) =
-                revset_edit_with_history(ui, "View", &mut self.view_revset, None, None);
+            let (_view_edit, view_changed) = revset_edit_with_history(
+                ui,
+                "View",
+                &mut self.view_revset,
+                None,
+                self.last_view_node_count.as_ref(),
+            );
 
             if view_changed || !self.initialized {
-                let create_result = create_graph(&self.jj_graph, &self.view_revset.value);
-                if create_result.is_err() {
-                    self.view_revset.history.set_last_tentative(true);
-                }
-                self.view_revset.error = match create_result {
-                    Ok((g, node_idxs, limit_hit)) => {
-                        self.graph = g;
-                        self.node_idxs = node_idxs;
-                        egui_graphs::reset_layout::<egui_graphs::LayoutStateHierarchical>(ui, None);
-                        if limit_hit {
-                            Some("Node limit reached. The graph is incomplete.".to_string())
-                        } else {
-                            None
-                        }
-                    }
-                    Err(CreateError::RevsetParseError(msg)) => Some(msg),
-                    Err(CreateError::JjError(msg)) => Some(msg),
-                };
+                self.update_view(ui);
             }
-
             if filter_changed || view_changed || !self.initialized {
-                let resolve_result =
-                    resolve_filter_revset(&self.jj_graph, &self.filter_revset.value);
-                match resolve_result {
-                    Ok((filter_revset, calc_time, node_count)) => {
-                        let _ = mark_graph(
-                            &mut self.graph,
-                            &self.node_idxs,
-                            self.working_copy_commit_id.as_ref(),
-                            &self.jj_graph,
-                            filter_revset,
-                        );
-                        self.last_filter_calc_time = Some(calc_time);
-                        self.last_filter_node_count = Some(node_count);
-                        self.filter_revset.error = None;
-                    }
-                    Err(e) => {
-                        self.last_filter_calc_time = None;
-                        self.last_filter_node_count = None;
-                        self.filter_revset.history.set_last_tentative(true);
-
-                        match e {
-                            ResolveError::RevsetParseError(msg) => {
-                                self.filter_revset.error = Some(msg);
-                            }
-                            ResolveError::JjError => {
-                                self.filter_revset.error = None;
-                            }
-                        }
-                    }
-                }
+                self.update_filter();
             }
 
             if !self.initialized {
