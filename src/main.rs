@@ -5,6 +5,7 @@ use jj_lib::backend::CommitId;
 use jj_lib::repo::Repo;
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
+use std::time::{Duration, Instant};
 
 use crate::node_shape::NodeShape;
 
@@ -16,7 +17,8 @@ const MAX_NODES: usize = 100;
 
 // The undirected graph does not put nodes in nice positions when rendering a hierarchical graph view.
 // type GraphType = egui_graphs::Graph<CommitId, (), petgraph::Undirected>;
-type GraphType = egui_graphs::Graph<CommitId, (), petgraph::Directed, petgraph::csr::DefaultIx, NodeShape>;
+type GraphType =
+    egui_graphs::Graph<CommitId, (), petgraph::Directed, petgraph::csr::DefaultIx, NodeShape>;
 
 #[derive(Parser)]
 #[command(name = "Revset Explorer")]
@@ -88,6 +90,7 @@ fn create_sample_repo() -> Result<(), anyhow::Error> {
 struct ExplorerApp {
     initialized: bool,
     filter_revset: RevsetEntry,
+    last_filter_calc_time: Option<Duration>,
     view_revset: RevsetEntry,
     graph: GraphType,
     node_idxs: Vec<petgraph::graph::NodeIndex>,
@@ -213,6 +216,7 @@ impl ExplorerApp {
         Self {
             initialized: false,
             filter_revset: RevsetEntry::new(&initial_filter),
+            last_filter_calc_time: None,
             view_revset: RevsetEntry::new(&initial_view),
             graph: g,
             node_idxs,
@@ -221,8 +225,9 @@ impl ExplorerApp {
         }
     }
 
-    fn mark_graph(&mut self) -> anyhow::Result<(), MarkError> {
-        let filter_revset = self.jj_graph.get_revset(&self.filter_revset.value);
+    fn mark_graph(&mut self) -> anyhow::Result<std::time::Duration, MarkError> {
+        let (filter_revset, first_calc_time) =
+            get_revset_timed(&self.jj_graph, &self.filter_revset.value);
 
         #[expect(clippy::type_complexity)]
         let (in_filter, revset_parse_error): (Box<dyn Fn(&CommitId) -> Result<_, _>>, _) =
@@ -234,6 +239,23 @@ impl ExplorerApp {
                     Some(e),
                 ),
             };
+
+        // Find average calculation time
+        let mut total_time = first_calc_time;
+        let mut run_count = 1;
+        if revset_parse_error.is_none() {
+            for _ in 0..10 {
+                if total_time > Duration::from_millis(100) {
+                    // Don't let the user wait too long
+                    // TODO: Do calculation in a background task
+                    break;
+                }
+                let (_, calc_time) = get_revset_timed(&self.jj_graph, &self.filter_revset.value);
+                run_count += 1;
+                total_time += calc_time;
+            }
+        }
+        let avg_time = total_time.checked_div(run_count).unwrap();
 
         // TODO: Global var
         let immutable_revset = self
@@ -295,9 +317,21 @@ impl ExplorerApp {
         {
             Err(MarkError::RevsetParseError(e.to_string()))
         } else {
-            Ok(())
+            Ok(avg_time)
         }
     }
+}
+fn get_revset_timed<'a>(
+    jj_graph: &'a jjgraph::JjGraph,
+    value: &str,
+) -> (
+    Result<Box<dyn jj_lib::revset::Revset + 'a>, jjgraph::RevsetError>,
+    Duration,
+) {
+    let start = Instant::now();
+    let revset = jj_graph.get_revset(value);
+    let end = Instant::now();
+    (revset, end - start)
 }
 
 /// Revset text edit box with error message display
@@ -306,6 +340,7 @@ fn revset_edit(
     label: &str,
     value: &mut String,
     error: &Option<String>,
+    calculation_time: Option<Duration>,
 ) -> egui::Response {
     ui.horizontal(|ui| {
         let revset_label = ui.label(label);
@@ -316,7 +351,7 @@ fn revset_edit(
                 }
                 ui.add(
                     egui::TextEdit::singleline(value)
-                        .desired_width(600.)
+                        .desired_width(500.)
                         .cursor_at_end(true)
                         .hint_text(
                             "Enter a revset here, like \"@\". Navigate to previous entries using up/down keys.",
@@ -331,6 +366,9 @@ fn revset_edit(
         } else {
             "".to_owned()
         };
+        if err_msg.is_empty() && let Some(time) = calculation_time {
+            ui.label(format!("{} ms", &time.as_millis()));
+        }
         let _error_label = ui.add_sized(
             [1., ui.text_style_height(&egui::TextStyle::Monospace) * 4.],
             egui::Label::new(RichText::new(err_msg).family(egui::FontFamily::Monospace)),
@@ -344,12 +382,14 @@ fn revset_edit_with_history(
     ui: &mut egui::Ui,
     label: &str,
     revset_entry: &mut RevsetEntry,
+    calculation_time: Option<Duration>,
 ) -> (egui::Response, bool) {
     let resp = revset_edit(
         ui,
         &format!("{}: ", label),
         &mut revset_entry.value,
         &revset_entry.error,
+        calculation_time,
     );
 
     let mut value_from_history = false;
@@ -386,10 +426,14 @@ fn revset_edit_with_history(
 impl eframe::App for ExplorerApp {
     fn update(&mut self, ctx: &egui::Context, _frame: &mut eframe::Frame) {
         egui::CentralPanel::default().show(ctx, |ui| {
-            let (filter_edit, filter_changed) =
-                revset_edit_with_history(ui, "Select: ", &mut self.filter_revset);
+            let (filter_edit, filter_changed) = revset_edit_with_history(
+                ui,
+                "Select: ",
+                &mut self.filter_revset,
+                self.last_filter_calc_time,
+            );
             let (_view_edit, view_changed) =
-                revset_edit_with_history(ui, "View: ", &mut self.view_revset);
+                revset_edit_with_history(ui, "View: ", &mut self.view_revset, None);
 
             if view_changed || !self.initialized {
                 let create_result = create_graph(&self.jj_graph, &self.view_revset.value);
@@ -416,9 +460,13 @@ impl eframe::App for ExplorerApp {
                 let update_result = self.mark_graph();
                 if update_result.is_err() {
                     self.filter_revset.history.set_last_tentative(true);
+                    self.last_filter_calc_time = None;
                 }
                 self.filter_revset.error = match update_result {
-                    Ok(()) => None,
+                    Ok(duration) => {
+                        self.last_filter_calc_time = Some(duration);
+                        None
+                    }
                     Err(MarkError::RevsetParseError(msg)) => Some(msg),
                     Err(MarkError::JjError) => None,
                 };
@@ -454,7 +502,8 @@ impl eframe::App for ExplorerApp {
             .with_navigations(&graph_navigation)
             .with_interactions(&graph_interaction)
             .with_styles(&egui_graphs::SettingsStyle::default().with_labels_always(true));
-            let mut s = egui_graphs::get_layout_state::<egui_graphs::LayoutStateHierarchical>(ui, None);
+            let mut s =
+                egui_graphs::get_layout_state::<egui_graphs::LayoutStateHierarchical>(ui, None);
             s.center_parent = true;
             egui_graphs::set_layout_state(ui, s, None);
             ui.add(&mut graph_view);
