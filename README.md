@@ -10,9 +10,7 @@ cargo install --git=https://github.com/thomasa88/revset-explorer.git --locked
 
 # Usage
 
-Revset Explorer uses the JJ repository
-
-Navigate to a directory containing a JJ repository and run `revset-explorer`.
+Revset Explorer uses an existing JJ repository as basis for the graph. Navigate to a directory containing a JJ repository and run `revset-explorer` or use the flag `-R <path/to/repo>`.
 
 The window that opens shows a part of the commit tree, as decided by the "view" input. The arrows point from child to parent commits.
 
@@ -24,7 +22,7 @@ Use the "view" input to change what nodes are shown in the program.
 
 Node colors:
 
-* Green: @
+* Green: Working copy (@)
 * Turquoise: Immutable changes/commits
 * Yellow: Changes/commits
 
@@ -51,5 +49,7 @@ Edited28m
 * Better sample repository
 
 * Make sample repository creation cross-platform
+
+* Build the sample repository into the application.
 
 * Do revset calculation time iterations in a separate task or thread.
