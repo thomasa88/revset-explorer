@@ -118,7 +118,11 @@ impl RevsetEntry {
         Self {
             value: initial_value.to_owned(),
             error: None,
-            history: history::History::new(HISTORY_SIZE),
+            history: {
+                let mut h = history::History::new(HISTORY_SIZE);
+                h.add(initial_value, false);
+                h
+            },
         }
     }
 }
